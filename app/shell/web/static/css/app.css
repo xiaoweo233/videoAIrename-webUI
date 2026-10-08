@@ -1885,3 +1885,27 @@ button,
   color: var(--warn);
   font-size: 12px;
 }
+
+/* ---------- 提示词编辑区（多行文本域） ---------- */
+.prompt-area {
+  height: auto;
+  min-height: 132px;
+  padding: 10px 12px;
+  line-height: 1.6;
+  font-size: 12.5px;
+  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.field-label .spacer {
+  flex: 1 1 auto;
+}
+
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+.prompt-count {
+  color: var(--text-mute);
+}

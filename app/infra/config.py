@@ -147,9 +147,14 @@ class AppConfig:
             self.save()
 
     def replace(self, whole: Dict[str, Any], *, save: bool = True) -> None:
-        """整体替换（PUT /config）：先补全默认值再落盘。"""
+        """整体替换（PUT /config）。
+
+        以「当前配置」为底做深合并，而**不是**以 DEFAULT_CONFIG 为底 ——
+        否则客户端未提交的键（例如用户自定义的提示词）会被悄悄重置成默认值。
+        前端提交的始终是完整配置（含默认键），因此「恢复默认」依然有效。
+        """
         with self._lock:
-            self.data = deep_merge(DEFAULT_CONFIG, whole or {})
+            self.data = deep_merge(self.data, whole or {})
         if save:
             self.save()
 

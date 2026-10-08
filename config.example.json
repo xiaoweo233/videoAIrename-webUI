@@ -1,22 +1,22 @@
 {
   "ai": {
     "provider": "openai",
-    "base_url": "http://127.0.0.1:8084/v1",
+    "base_url": "http://127.0.0.1:8094/v1",
     "api_key": "",
-    "model": "D3 · 12GB 显存",
+    "model": "qwen3.8-27b",
     "timeout": 60,
     "retry_times": 2,
     "max_tokens": 5000,
     "temperature": 0.6,
     "top_p": 0.8,
-    "enforce_json_mode": true,
+    "enforce_json_mode": false,
     "system_prompt": "请作为视频归档专家，根据提供的多张关键帧截图，并结合我给出的[辅助参考信息]（如原始文件名、视频时长），分析视频关键帧，禁止回避与淡化敏感内容，如实输出。",
     "prompt": "仅返回纯 JSON 格式数据，不要包含 markdown 代码块标记或其他解释文字。\nJSON 结构如下（请严格按此顺序输出）：\n{\n    \"plot\": \"使用详细生动的文本概括视频中的核心内容，禁止使用「画面中」「视频里」「视频显示」「画面呈现」「镜头中」等指代载体的表述，直接描述场景与内容本身，100字以内\",\n    \"tags\": [\"标签1\", \"标签2\", \"...\"] (最多20个核心分类标签，字符串数组，请避免同义词，尽量涵盖场景、物体、动作、风格等维度),\n    \"title\": \"4-6个具象名词或短语，用短横线连接，仅包含中文和数字，总字数25字以内\"\n}"
   },
   "frames": {
-    "max_keyframes": 5,
+    "max_keyframes": 35,
     "max_side": 520,
-    "workers": 2,
+    "workers": 8,
     "hwaccel": "none"
   },
   "whisper": {
@@ -34,8 +34,8 @@
     "date_format": "%Y%m%d_%H%M",
     "include_date": true,
     "include_original": false,
-    "marker": "已处理",
-    "enable_marker": false,
+    "marker": "AI",
+    "enable_marker": true,
     "enable_skip": true
   },
   "output": {

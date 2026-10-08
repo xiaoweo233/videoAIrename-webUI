@@ -553,6 +553,61 @@ export function createView(ctx) {
     ]);
   }
 
+  // ---------- 提示词（可自定义） ----------
+  function buildPromptArea(label, cfgPath, hint) {
+    const ta = h('textarea', { class: 'field-input prompt-area', rows: '7' });
+    ta.value = getPath(store.state.config, cfgPath, '') || '';
+
+    const save = () => commit(setPath(store.state.config, cfgPath, ta.value));
+    ta.addEventListener('change', save);
+    ta.addEventListener('blur', save);
+
+    const counter = h('span', { class: 'prompt-count' });
+    const updateCount = () => {
+      counter.textContent = `${ta.value.length} 字`;
+    };
+    ta.addEventListener('input', updateCount);
+    updateCount();
+
+    const reset = h('button', { class: 'btn btn-sm', type: 'button', text: '恢复默认' });
+    reset.addEventListener('click', () => {
+      const def = getPath(DEFAULT_CONFIG, cfgPath, '') || '';
+      ta.value = def;
+      updateCount();
+      commit(setPath(store.state.config, cfgPath, def));
+      toast('已恢复默认提示词', 'info');
+    });
+
+    fieldRefs.push({ field: { path: cfgPath }, input: ta, kind: 'input' });
+
+    return h('div', { class: 'field field-wide' }, [
+      h('div', { class: 'field-label' }, [label, h('span', { class: 'spacer' }), reset]),
+      ta,
+      h('div', { class: 'field-hint' }, [hint, ' · ', counter]),
+    ]);
+  }
+
+  function buildPromptPanel() {
+    const wrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } });
+    wrap.appendChild(buildPromptArea(
+      '系统提示词 ai.system_prompt', 'ai.system_prompt',
+      '角色与总要求：决定 AI 以什么身份、什么尺度理解视频',
+    ));
+    wrap.appendChild(buildPromptArea(
+      '用户提示词 ai.prompt', 'ai.prompt',
+      '输出格式要求：必须要求模型返回 JSON（含 title / plot / tags）',
+    ));
+
+    return h('div', { class: 'panel' }, [
+      h('div', { class: 'panel-head' }, [
+        h('span', { class: 'panel-title', text: '提示词（可自定义）' }),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'panel-hint', text: '改动即时保存到 config.json' }),
+      ]),
+      wrap,
+    ]);
+  }
+
   // ---------- 术语速查 ----------
   function buildGlossary() {
     const grid = h('div', { class: 'form-grid' });
@@ -632,6 +687,7 @@ export function createView(ctx) {
       buildHeader(),
       buildSwitchGroups(),
       buildFormPanel('AI 配置', '严格对齐 config.json 的 ai 结构', AI_FIELDS),
+      buildPromptPanel(),
       buildAITestPanel(),
       buildFormPanel('高级参数', 'frames / whisper / naming / runtime', ADVANCED_FIELDS),
       buildMirrorPanel(),

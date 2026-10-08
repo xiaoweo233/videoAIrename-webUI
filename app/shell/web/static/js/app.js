@@ -39,12 +39,52 @@ const toastRoot = document.getElementById('toast-root');
 const bootBar = document.getElementById('boot-bar');
 
 // ---------- 配置持久化（debounce，改动即存） ----------
-const persistConfig = debounce((config) => {
-  store.set({ configDirty: false });
+// 说明：配置的「真源」在服务端 config.json，前端每次改动都会 PUT 回去，
+// 因此下次打开仍在。为了不丢失「刚改完就关页面」的那一次改动，
+// 这里额外记录待保存配置，并在页面隐藏/关闭时用 keepalive 冲出。
+let pendingConfig = null;
+
+function sendConfig(config, keepalive) {
+  if (keepalive && typeof fetch === 'function') {
+    try {
+      fetch(`${apiClient.baseUrl}/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(config),
+        keepalive: true,
+      }).catch(() => {
+        /* 页面正在卸载，失败也无能为力 */
+      });
+      return;
+    } catch (e) {
+      /* 回退到常规请求 */
+    }
+  }
   apiClient.putConfig(config).catch(() => {
-    /* 后端不可用时静默：配置已保存在本地状态 */
+    /* 后端不可用时静默：配置仍保存在本地状态 */
   });
+}
+
+const persistConfig = debounce((config) => {
+  pendingConfig = null;
+  store.set({ configDirty: false });
+  sendConfig(config, false);
 }, 700);
+
+/** 排队保存（视图统一入口） */
+function queueConfigSave(config) {
+  pendingConfig = config;
+  persistConfig(config);
+}
+
+/** 页面隐藏/关闭时把待保存配置冲出去 */
+function flushPendingConfig() {
+  if (!pendingConfig) return;
+  const cfg = pendingConfig;
+  pendingConfig = null;
+  persistConfig.cancel();
+  sendConfig(cfg, true);
+}
 
 // ---------- Toast ----------
 /**
@@ -143,7 +183,7 @@ const control = {
   },
 };
 
-const ctx = { store, apiClient, toast, router, persistConfig, control };
+const ctx = { store, apiClient, toast, router, persistConfig: queueConfigSave, control };
 
 // ---------- 视图挂载 ----------
 function renderRoute(route, { force = false } = {}) {
@@ -381,6 +421,12 @@ function init() {
 
   window.addEventListener('resize', debounce(() => updateNav(currentRoute), 150), {
     passive: true,
+  });
+
+  // 关页面/切后台时，把还没发出去的配置改动补发（keepalive）
+  window.addEventListener('pagehide', flushPendingConfig);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPendingConfig();
   });
 
   // 配置引导：尝试拉取后端配置，失败则使用内置默认
