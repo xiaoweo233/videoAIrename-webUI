@@ -1,0 +1,36 @@
+# 视频 AI 重命名助手 — 后端依赖
+#
+# 说明：本文件用于「手动安装」或「离线分发」场景。
+# 正常启动时 run.py 会自动把缺失的依赖安装到 libs/（零污染，不写系统 site-packages）。
+#
+# 手动安装到 libs/（推荐，与自动安装一致）：
+#   python -m pip install --target libs -r requirements.txt
+#
+# 手动安装到当前环境（开发用）：
+#   python -m pip install -r requirements.txt
+
+# ---------- 必需：后端服务 ----------
+fastapi>=0.110
+uvicorn[standard]>=0.27
+sqlalchemy>=2.0
+python-multipart>=0.0.9
+
+# ---------- 必需：AI 分析（OpenAI 兼容接口）----------
+openai>=1.0
+
+# ---------- 按需：Whisper 语音转写 ----------
+# 用户已选择「强制安装并启用」。GPU 推理需配合下方 CUDA 运行库。
+faster-whisper>=1.0
+tqdm>=4.66
+
+# ---------- 按需：Gemini 后端（ai.provider=gemini 时需要）----------
+google-genai>=1.0
+
+# ---------- 按需：模型下载 ----------
+huggingface_hub>=0.23
+
+# ---------- 按需：Whisper 的 CUDA 运行库（NVIDIA 显卡）----------
+# 缺失会导致 faster-whisper 的 CUDA 推理挂起，此库提供 cublas64_12.dll / cudnn。
+# 仅 Windows + NVIDIA 需要；CPU 转写可省略。
+nvidia-cublas-cu12>=12.4
+nvidia-cudnn-cu12>=9.1

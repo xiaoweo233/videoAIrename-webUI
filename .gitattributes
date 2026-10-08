@@ -1,0 +1,25 @@
+# 统一换行策略：源码入库用 LF，Windows 脚本检出时固定 CRLF。
+# cmd.exe 解析 .bat 必须使用 CRLF，否则 if/for 块会报「命令语法不正确」。
+* text=auto eol=lf
+*.py   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.vbs  text eol=crlf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
