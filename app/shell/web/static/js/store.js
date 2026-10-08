@@ -112,7 +112,8 @@ export const DEFAULT_CONFIG = Object.freeze({
     include_original: false,
     marker: 'AI',
     enable_marker: true,
-    enable_skip: false,
+    // 默认开启：文件名含标记 或 已写入 ExifTool 软水印的视频直接跳过
+    enable_skip: true,
   },
   output: { nfo: true, metadata: true, srt: true, move_failed: true, dry_run: false },
   runtime: {
@@ -120,6 +121,9 @@ export const DEFAULT_CONFIG = Object.freeze({
     log_file: 'logs/run.log',
     verbose: false,
     auto_install_cuda: true,
+    // 国内镜像（留空 = 官方源）
+    pip_index: '',
+    hf_endpoint: '',
   },
   input: { recursive: true },
 });

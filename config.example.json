@@ -1,9 +1,9 @@
 {
   "ai": {
     "provider": "openai",
-    "base_url": "http://127.0.0.1:8094/v1",
+    "base_url": "http://127.0.0.1:8084/v1",
     "api_key": "",
-    "model": "qwen3.8-9b",
+    "model": "D3 · 12GB 显存",
     "timeout": 60,
     "retry_times": 2,
     "max_tokens": 5000,
@@ -34,8 +34,8 @@
     "date_format": "%Y%m%d_%H%M",
     "include_date": true,
     "include_original": false,
-    "marker": "AI",
-    "enable_marker": true,
+    "marker": "已处理",
+    "enable_marker": false,
     "enable_skip": true
   },
   "output": {
@@ -49,7 +49,9 @@
     "ai_workers": 1,
     "log_file": "logs/run.log",
     "verbose": false,
-    "auto_install_cuda": true
+    "auto_install_cuda": true,
+    "pip_index": "",
+    "hf_endpoint": ""
   },
   "input": {
     "recursive": true

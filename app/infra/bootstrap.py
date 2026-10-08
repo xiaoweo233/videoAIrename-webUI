@@ -23,8 +23,67 @@ from . import paths
 
 __all__ = [
     "early_init", "ensure_runtime", "probe_runtime", "download_hf_model",
-    "RuntimeReport", "cuda_libs_status", "ensure_cuda_libs",
+    "RuntimeReport", "cuda_libs_status", "ensure_cuda_libs", "apply_mirrors",
+    "mirror_config", "PIP_PRESETS", "HF_PRESETS", "install_whisper",
 ]
+
+# ------------------------------------------------------------------
+# 国内镜像（可自定义）
+#   依赖下载走 pip -i；模型下载走 HF_ENDPOINT（huggingface_hub 官方支持）
+# ------------------------------------------------------------------
+PIP_PRESETS = {
+    "official": "https://pypi.org/simple",
+    "tsinghua": "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "aliyun": "https://mirrors.aliyun.com/pypi/simple",
+    "ustc": "https://pypi.mirrors.ustc.edu.cn/simple",
+    "tencent": "https://mirrors.cloud.tencent.com/pypi/simple",
+}
+HF_PRESETS = {
+    "official": "https://huggingface.co",
+    "hf-mirror": "https://hf-mirror.com",
+    "modelscope": "https://www.modelscope.cn",
+}
+
+_PIP_INDEX: str = ""
+_HF_ENDPOINT: str = ""
+
+
+def apply_mirrors(pip_index: "str | None" = None, hf_endpoint: "str | None" = None) -> dict:
+    """设置依赖/模型下载镜像。空字符串表示用官方源。
+
+    - pip_index → 影响 _pip_install（-i 参数）
+    - hf_endpoint → 设置 HF_ENDPOINT，影响 huggingface_hub 模型下载
+    """
+    global _PIP_INDEX, _HF_ENDPOINT
+    _PIP_INDEX = (pip_index or "").strip()
+    _HF_ENDPOINT = (hf_endpoint or "").strip()
+
+    if _HF_ENDPOINT:
+        os.environ["HF_ENDPOINT"] = _HF_ENDPOINT
+    else:
+        os.environ.pop("HF_ENDPOINT", None)
+
+    if _PIP_INDEX:
+        os.environ["PIP_INDEX_URL"] = _PIP_INDEX
+        # 部分镜像走 http 或自签证书时需要放行主机
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(_PIP_INDEX).hostname
+            if host:
+                os.environ["PIP_TRUSTED_HOST"] = host
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        os.environ.pop("PIP_INDEX_URL", None)
+        os.environ.pop("PIP_TRUSTED_HOST", None)
+    return mirror_config()
+
+
+def mirror_config() -> dict:
+    """当前生效的镜像配置。"""
+    return {"pip_index": _PIP_INDEX, "hf_endpoint": _HF_ENDPOINT,
+            "pip_presets": PIP_PRESETS, "hf_presets": HF_PRESETS}
 
 _INITIALIZED = False
 
@@ -301,25 +360,40 @@ def probe_runtime() -> RuntimeReport:
     return report
 
 
-def _pip_install(packages: List[str], on_log=None) -> bool:
-    """把依赖安装到 libs/（--target），不污染系统环境。"""
+def _pip_install(packages: List[str], on_log=None, index_url: str = "") -> bool:
+    """把依赖安装到 libs/（--target），不污染系统环境。
+
+    index_url 为空时回退到 apply_mirrors() 设置的全局 pip 源，再为空则用官方源。
+    """
     import subprocess
 
     if not packages:
         return True
+    index = (index_url or _PIP_INDEX or "").strip()
     cmd = [
         sys.executable, "-m", "pip", "install",
         "--target", str(paths.LIBS_DIR),
         "--disable-pip-version-check", "--no-warn-script-location",
         "--upgrade",
-        *packages,
     ]
+    if index:
+        cmd += ["-i", index]
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(index).hostname
+            if host and urlparse(index).scheme == "http":
+                cmd += ["--trusted-host", host]
+        except Exception:  # noqa: BLE001
+            pass
+    cmd += list(packages)
     if on_log:
-        on_log(f"正在安装依赖到 libs/：{' '.join(packages)}")
+        src = f"（源：{index}）" if index else "（官方源）"
+        on_log(f"正在安装依赖到 libs/：{' '.join(packages)} {src}")
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=1800,
+            timeout=3600,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         if on_log:
@@ -488,10 +562,21 @@ def ensure_runtime(auto_install_cuda: bool = True, on_log=None) -> RuntimeReport
     return probe_runtime()
 
 
+def install_whisper(on_log=None) -> dict:
+    """安装 faster-whisper 依赖到 libs/（走 apply_mirrors 设置的 pip 源）。"""
+    if _importable("faster_whisper"):
+        return {"ok": True, "installed": False, "already": True}
+    ok = _pip_install(["faster-whisper>=1.0", "tqdm"], on_log=on_log)
+    return {"ok": bool(ok and _importable("faster_whisper")), "installed": bool(ok),
+            "already": False,
+            "error": "" if ok else "安装失败（请检查网络或改用国内镜像后重试）"}
+
+
 def download_hf_model(repo_id: str, on_log=None) -> bool:
     """按需下载 HuggingFace 模型到 models/（Whisper 用）。
 
     走 HF_HOME（已重定向到 models/huggingface），规避代理导致的缓存污染。
+    镜像：apply_mirrors(hf_endpoint=...) 设置的 HF_ENDPOINT 会被 huggingface_hub 自动采用。
     """
     try:
         from huggingface_hub import snapshot_download  # type: ignore
@@ -501,7 +586,8 @@ def download_hf_model(repo_id: str, on_log=None) -> bool:
         else:
             return False
     if on_log:
-        on_log(f"正在下载模型 {repo_id} 到 models/ ...")
+        ep = _HF_ENDPOINT or "https://huggingface.co"
+        on_log(f"正在下载模型 {repo_id} 到 models/（端点：{ep}）...")
     try:
         snapshot_download(
             repo_id=repo_id,

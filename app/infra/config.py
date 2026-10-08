@@ -70,7 +70,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "include_original": False,
         "marker": "AI",
         "enable_marker": True,
-        "enable_skip": False,
+        # 默认开启：文件名含标记 或 已写入 ExifTool 软水印的视频直接跳过
+        "enable_skip": True,
     },
     "output": {
         "nfo": True,
@@ -84,6 +85,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "log_file": "logs/run.log",
         "verbose": False,
         "auto_install_cuda": True,
+        # 国内镜像（留空 = 官方源）：pip 依赖下载 / HuggingFace 模型下载
+        "pip_index": "",
+        "hf_endpoint": "",
     },
     "input": {"recursive": True},
 }

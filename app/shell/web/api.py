@@ -59,6 +59,10 @@ async def lifespan(app: FastAPI):
     init_db()
     recovered = repo.recover_orphan_tasks()
 
+    # 1.5) 应用配置里的下载镜像（pip 源 / HuggingFace 端点）
+    bootstrap.apply_mirrors(config.get("runtime.pip_index"),
+                            config.get("runtime.hf_endpoint"))
+
     # 2) 绑定事件循环，供 SSE 桥使用
     sse_broker.bind_loop(asyncio.get_running_loop())
 
@@ -121,6 +125,7 @@ class ReviewBody(BaseModel):
 class DialogBody(BaseModel):
     initial_dir: Optional[str] = None
     multi: Optional[bool] = None
+    timeout: Optional[float] = None
 
 
 class AITestBody(BaseModel):
@@ -165,6 +170,7 @@ def dialog_files(body: DialogBody = Body(default_factory=DialogBody)) -> Dict[st
         result = dialogs.pick_files(
             multi=True if body.multi is None else bool(body.multi),
             initial_dir=body.initial_dir or "",
+            timeout=float(body.timeout) if body.timeout else dialogs.DEFAULT_TIMEOUT,
         )
     except dialogs.DialogBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -176,12 +182,42 @@ def dialog_files(body: DialogBody = Body(default_factory=DialogBody)) -> Dict[st
 @app.post("/api/dialog/folder")
 def dialog_folder(body: DialogBody = Body(default_factory=DialogBody)) -> Dict[str, Any]:
     try:
-        result = dialogs.pick_folder(initial_dir=body.initial_dir or "")
+        result = dialogs.pick_folder(
+            initial_dir=body.initial_dir or "",
+            timeout=float(body.timeout) if body.timeout else dialogs.DEFAULT_TIMEOUT,
+        )
     except dialogs.DialogBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not result.get("ok") and not result.get("cancelled"):
         raise HTTPException(status_code=400, detail=result.get("error") or "选择失败")
     return result
+
+
+@app.post("/api/dialog/cancel")
+async def dialog_cancel() -> Dict[str, Any]:
+    """取消当前挂起的系统选择器（解决「看不到窗口但一直提示已打开」）。"""
+    return dialogs.cancel_dialog()
+
+
+@app.get("/api/dialog/status")
+async def dialog_status() -> Dict[str, Any]:
+    return dialogs.dialog_state()
+
+
+# ------------------------------------------------------------------
+# /api/mirrors —— 下载镜像（pip 源 / HuggingFace 端点）
+# ------------------------------------------------------------------
+@app.get("/api/mirrors")
+async def get_mirrors() -> Dict[str, Any]:
+    cur = bootstrap.mirror_config()
+    rt = config.runtime
+    return {
+        **cur,
+        "config": {
+            "pip_index": rt.get("pip_index", ""),
+            "hf_endpoint": rt.get("hf_endpoint", ""),
+        },
+    }
 
 
 # ------------------------------------------------------------------
@@ -232,6 +268,8 @@ async def whisper_status() -> Dict[str, Any]:
 @app.post("/api/whisper/setup")
 def whisper_setup() -> Dict[str, Any]:
     """下载 / 修复 CUDA 运行库（cublas64_12.dll 等）到 libs/。"""
+    rt = config.runtime
+    bootstrap.apply_mirrors(rt.get("pip_index", ""), rt.get("hf_endpoint", ""))
     logs: List[str] = []
     try:
         result = bootstrap.ensure_cuda_libs(on_log=lambda m: logs.append(m))
@@ -247,6 +285,29 @@ def whisper_setup() -> Dict[str, Any]:
         "logs": logs,
         "cuda_libs": result.get("status"),
         "cuda_available": report.cuda_available,
+    }
+
+
+@app.post("/api/whisper/install")
+def whisper_install() -> Dict[str, Any]:
+    """安装 faster-whisper 依赖到 libs/（走配置的 pip 镜像）。"""
+    rt = config.runtime
+    bootstrap.apply_mirrors(rt.get("pip_index", ""), rt.get("hf_endpoint", ""))
+    logs: List[str] = []
+    try:
+        result = bootstrap.install_whisper(on_log=lambda m: logs.append(m))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Whisper 依赖安装失败：{exc}") from exc
+    for line in logs:
+        event_bus.emit_log("INFO", line, source="whisper-setup")
+    report = bootstrap.probe_runtime()
+    return {
+        "ok": bool(result.get("ok")),
+        "installed": bool(result.get("installed")),
+        "already": bool(result.get("already")),
+        "error": result.get("error", ""),
+        "logs": logs,
+        "faster_whisper": report.faster_whisper,
     }
 
 
@@ -427,6 +488,9 @@ async def put_config(payload: Dict[str, Any] = Body(default_factory=dict)) -> Di
         config.replace(payload)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"配置保存失败：{exc}") from exc
+    # 镜像改动立即生效（下次依赖/模型下载即走新源）
+    bootstrap.apply_mirrors(config.get("runtime.pip_index"),
+                            config.get("runtime.hf_endpoint"))
     event_bus.emit_log("DEBUG", "配置已更新并写盘 config.json", source="config")
     return {"ok": True, "config": config.as_dict()}
 

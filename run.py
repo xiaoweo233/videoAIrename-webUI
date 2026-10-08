@@ -53,8 +53,23 @@ def _print_banner(host: str, port: int) -> None:
     print(line)
 
 
+def _apply_mirrors_from_config() -> None:
+    """把 config.json 里的国内镜像应用到 pip / HuggingFace 下载。
+
+    必须在 ensure_runtime() 之前调用，否则依赖安装仍会走官方源。
+    """
+    try:
+        from app.infra.config import load_config
+
+        rt = load_config().runtime
+        bootstrap.apply_mirrors(rt.get("pip_index", ""), rt.get("hf_endpoint", ""))
+    except Exception:  # noqa: BLE001 - 配置不可用不应阻断启动
+        pass
+
+
 def _selfcheck() -> int:
     """自检：探测依赖与工具，输出报告后退出（CI / 分发前验证用）。"""
+    _apply_mirrors_from_config()
     report = bootstrap.ensure_runtime(auto_install_cuda=False)
     data = report.as_dict()
     print("=" * 62)
@@ -94,6 +109,9 @@ def main() -> int:
         return _selfcheck()
 
     # 第二步：探测/补齐依赖（必需项自动安装到 libs/）
+    # 先应用国内镜像，保证下面的自动安装走用户指定的源
+    _apply_mirrors_from_config()
+
     auto_cuda = True
     try:
         from app.infra.config import load_config

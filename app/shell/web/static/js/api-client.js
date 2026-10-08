@@ -144,6 +144,16 @@ export class ApiClient {
     return this.post('/dialog/folder', payload, { timeout: 900000 });
   }
 
+  /** 取消挂起的原生选择器（解决「看不到窗口却提示已打开」） */
+  cancelDialog() {
+    return this.post('/dialog/cancel', {}, { timeout: 8000 });
+  }
+
+  /** 查询原生选择器当前状态 */
+  dialogStatus() {
+    return this.get('/dialog/status', { timeout: 8000 });
+  }
+
   // ---------- AI 连接测试 / 转写环境 ----------
 
   /** 测试 AI 后端连通性并识别模型 @param {Object} [payload] */
@@ -159,6 +169,16 @@ export class ApiClient {
   /** 下载 / 修复 CUDA 运行库（较慢，放宽超时） */
   setupWhisper() {
     return this.post('/whisper/setup', {}, { timeout: 1800000 });
+  }
+
+  /** 安装 faster-whisper 依赖（走配置的 pip 镜像） */
+  installWhisper() {
+    return this.post('/whisper/install', {}, { timeout: 1800000 });
+  }
+
+  /** 读取下载镜像预设与当前配置 */
+  getMirrors() {
+    return this.get('/mirrors');
   }
 }
 

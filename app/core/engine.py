@@ -239,9 +239,11 @@ class RenameEngine:
             return self._finish(stopped=False)
 
         # ---------- 跳过已处理 ----------
+        # 打开（默认）：文件名含标记 **或** 已写入 ExifTool 软水印 → 直接跳过
+        # 关闭：全部重新处理（同名 .nfo / .srt 由写入端直接覆盖）
         pre_skipped = 0
         naming = self.config.naming
-        if naming.get("enable_skip") and naming.get("marker"):
+        if naming.get("enable_skip"):
             videos, pre_skipped = self._filter_processed(videos, naming.get("marker", "AI"))
             for _ in range(pre_skipped):
                 self._inc("skipped")
@@ -323,19 +325,32 @@ class RenameEngine:
     # 跳过已处理
     # ==================================================================
     def _filter_processed(self, videos: List[str], marker: str) -> Tuple[List[str], int]:
+        """筛掉「已处理」视频。
+
+        判定「已处理」的两个条件（满足任一即跳过）：
+          1) 文件名（不含扩展名）中含处理标记，如 `xxx_AI.mp4`；
+          2) 视频内部已写入 ExifTool 软水印（Software=AIVideoRenameV1）。
+        marker 为空时只按软水印判定。
+        """
         import re as _re
 
-        pattern = _re.compile(r"(?:^|_)" + _re.escape(marker) + r"(?:_|$)")
+        pattern = None
+        if marker:
+            pattern = _re.compile(r"(?:^|_)" + _re.escape(marker) + r"(?:_|$)")
         kept: List[str] = []
         skipped = 0
         for path in videos:
             stem = os.path.splitext(os.path.basename(path))[0]
-            if pattern.search(stem) or meta_mod.has_watermark(self.tools, path):
+            by_name = bool(pattern and pattern.search(stem))
+            if by_name or meta_mod.has_watermark(self.tools, path):
                 skipped += 1
+                self._log("DEBUG",
+                          f"⏭ 跳过（{'文件名标记' if by_name else '软水印'}）：{os.path.basename(path)}",
+                          file=path)
                 continue
             kept.append(path)
         if skipped:
-            self._log("INFO", f"⏩ 跳过 {skipped} 个已处理视频（标识/水印：{marker}）")
+            self._log("INFO", f"⏩ 跳过 {skipped} 个已处理视频（标记/水印：{marker or '仅水印'}）")
         return kept, skipped
 
     # ==================================================================

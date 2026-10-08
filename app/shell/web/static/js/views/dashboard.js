@@ -33,9 +33,61 @@ export function createView(ctx) {
 
   function pickErrMsg(err) {
     const status = err && err.status;
-    if (status === 409) return '已有选择窗口打开，请先完成它';
+    if (status === 409) return '已有选择窗口在等待操作；若看不到窗口，请点「取消等待」后重试';
     if (status === 0) return '选择超时或服务未响应，请重试';
     return (err && (err.message || err.detail)) || '打开系统选择器失败';
+  }
+
+  // file:///D:/a/b -> D:\a\b ；file://server/share -> \\server\share
+  function fileUrlToPath(url) {
+    let rest = String(url).replace(/^file:\/\//i, '');
+    if (/^\/[a-zA-Z][:|]/.test(rest)) {
+      rest = rest.slice(1); // 去掉盘符前的斜杠
+    } else if (!rest.startsWith('/')) {
+      rest = '//' + rest; // UNC
+    }
+    try {
+      rest = decodeURIComponent(rest);
+    } catch (e) {
+      /* 保留原样 */
+    }
+    return rest.replace(/\//g, '\\');
+  }
+
+  /**
+   * 从 drop 事件里尽力取出「绝对路径」。
+   * Chromium/Edge 从资源管理器拖入时会带上 text/uri-list（file:/// 形式），
+   * 这是浏览器环境下唯一能拿到真实路径的途径。
+   */
+  function pathsFromDrop(dt) {
+    const out = [];
+    const take = (s) => {
+      const v = String(s).trim();
+      if (v && !out.includes(v)) out.push(v);
+    };
+    const read = (type) => {
+      try {
+        return dt.getData(type) || '';
+      } catch (e) {
+        return '';
+      }
+    };
+    const uri = read('text/uri-list') || read('text/x-moz-url');
+    for (const line of uri.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      if (/^file:\/\//i.test(t)) take(fileUrlToPath(t));
+    }
+    if (!out.length) {
+      const plain = read('text/plain');
+      for (const line of plain.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        if (/^file:\/\//i.test(t)) take(fileUrlToPath(t));
+        else if (/^[a-zA-Z]:[\\/]/.test(t) || t.startsWith('\\\\')) take(t);
+      }
+    }
+    return out;
   }
 
   // ---------- 投放区 ----------
@@ -56,56 +108,56 @@ export function createView(ctx) {
     });
 
     const pickFilesBtn = h('button', { class: 'btn', type: 'button', text: '选择视频' });
-    pickFilesBtn.addEventListener('click', async () => {
-      const old = pickFilesBtn.textContent;
-      pickFilesBtn.disabled = true;
-      pickFilesBtn.textContent = '等待选择…';
+    const pickFolderBtn = h('button', { class: 'btn', type: 'button', text: '选择文件夹' });
+
+    // 等待期间显示「取消等待」，用于回收卡住的对话框
+    const cancelBtn = h('button', { class: 'btn btn-sm btn-danger', type: 'button', text: '取消等待' });
+    cancelBtn.hidden = true;
+    cancelBtn.addEventListener('click', async () => {
       try {
-        const res = await apiClient.pickFiles({ initial_dir: input.value.trim() });
-        if (res && res.cancelled) {
-          toast('已取消选择', 'info');
-          return;
-        }
-        const paths = (res && res.paths) || [];
-        if (!paths.length) {
-          toast('未选择任何文件', 'info');
-          return;
-        }
-        setPicked(paths);
-        toast(`已选择 ${paths.length} 个视频`, 'ok');
-      } catch (err) {
-        toast(pickErrMsg(err), 'warn', 4200);
-      } finally {
-        pickFilesBtn.disabled = false;
-        pickFilesBtn.textContent = old;
+        const r = await apiClient.cancelDialog();
+        toast(r && r.cancelled ? '已取消等待中的选择窗口' : '当前没有等待中的窗口', 'info');
+      } catch (e) {
+        toast('取消失败：' + ((e && e.message) || '未知错误'), 'warn');
       }
     });
 
-    const pickFolderBtn = h('button', { class: 'btn', type: 'button', text: '选择文件夹' });
-    pickFolderBtn.addEventListener('click', async () => {
-      const old = pickFolderBtn.textContent;
-      pickFolderBtn.disabled = true;
-      pickFolderBtn.textContent = '等待选择…';
+    function setPending(on, which) {
+      refs.pending = on;
+      pickFilesBtn.disabled = on;
+      pickFolderBtn.disabled = on;
+      cancelBtn.hidden = !on;
+      pickFilesBtn.textContent = on && which === 'files' ? '等待选择…' : '选择视频';
+      pickFolderBtn.textContent = on && which === 'folders' ? '等待选择…' : '选择文件夹';
+    }
+
+    async function doPick(which) {
+      setPending(true, which);
       try {
-        const res = await apiClient.pickFolder({ initial_dir: input.value.trim() });
+        const payload = { initial_dir: input.value.trim() };
+        const res = which === 'files'
+          ? await apiClient.pickFiles(payload)
+          : await apiClient.pickFolder(payload);
         if (res && res.cancelled) {
           toast('已取消选择', 'info');
           return;
         }
         const paths = (res && res.paths) || [];
         if (!paths.length) {
-          toast('未选择文件夹', 'info');
+          toast('未选择任何内容', 'info');
           return;
         }
         setPicked(paths);
-        toast('已选择文件夹', 'ok');
+        toast(which === 'files' ? `已选择 ${paths.length} 个视频` : '已选择文件夹', 'ok');
       } catch (err) {
-        toast(pickErrMsg(err), 'warn', 4200);
+        toast(pickErrMsg(err), 'warn', 4600);
       } finally {
-        pickFolderBtn.disabled = false;
-        pickFolderBtn.textContent = old;
+        setPending(false, null);
       }
-    });
+    }
+
+    pickFilesBtn.addEventListener('click', () => doPick('files'));
+    pickFolderBtn.addEventListener('click', () => doPick('folders'));
 
     const clearBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '清空' });
     clearBtn.addEventListener('click', () => {
@@ -134,10 +186,10 @@ export function createView(ctx) {
           html: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
         }),
       ]),
-      h('div', { class: 'dz-title', text: '用系统资源管理器选择视频或文件夹' }),
-      h('div', { class: 'dz-sub', text: '支持多选视频；也可选整个文件夹，自动看懂每个视频讲了什么' }),
+      h('div', { class: 'dz-title', text: '把视频或文件夹拖到这里' }),
+      h('div', { class: 'dz-sub', text: '也可用系统窗口选择；支持一次拖入多个视频或整个文件夹' }),
       h('div', { class: 'dz-path-row' }, [input, pickFilesBtn, pickFolderBtn]),
-      h('div', { class: 'dz-actions' }, [clearBtn]),
+      h('div', { class: 'dz-actions' }, [clearBtn, cancelBtn]),
       list,
     ]);
 
@@ -160,11 +212,17 @@ export function createView(ctx) {
       e.preventDefault();
       dragDepth = 0;
       dz.classList.remove('is-drag');
-      toast('浏览器无法提供绝对路径，请点「选择视频 / 选择文件夹」用系统窗口选择', 'info', 4200);
+      const paths = pathsFromDrop(e.dataTransfer);
+      if (paths.length) {
+        setPicked(paths);
+        toast(`已从拖入内容识别出 ${paths.length} 个路径`, 'ok');
+      } else {
+        toast('浏览器未提供路径信息，请点「选择视频 / 选择文件夹」用系统窗口选择', 'warn', 4600);
+      }
     });
     dz.addEventListener('click', (e) => {
       if (e.target === input || pickFilesBtn.contains(e.target) || pickFolderBtn.contains(e.target)
-        || clearBtn.contains(e.target)) return;
+        || clearBtn.contains(e.target) || cancelBtn.contains(e.target)) return;
       input.focus();
     });
     dz.addEventListener('keydown', (e) => {

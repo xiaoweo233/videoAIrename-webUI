@@ -48,7 +48,7 @@ const SWITCH_GROUPS = [
       { id: 'include_date', path: 'naming.include_date', label: '时间前缀', desc: '文件名前缀加 20261008_2313', tip: '' },
       { id: 'include_original', path: 'naming.include_original', label: '原名后缀', desc: '保留原文件名片段', tip: '' },
       { id: 'enable_marker', path: 'naming.enable_marker', label: '处理标记', desc: '加 AI_RENAMED 标记，便于识别', tip: '' },
-      { id: 'enable_skip', path: 'naming.enable_skip', label: '跳过已处理', desc: '重跑会覆盖 NFO / SRT', tip: '' },
+      { id: 'enable_skip', path: 'naming.enable_skip', label: '跳过已处理', desc: '名字含标记或已写软水印的视频跳过；关闭则全部重跑', tip: '' },
     ],
   },
   {
@@ -56,6 +56,7 @@ const SWITCH_GROUPS = [
     label: '输出',
     items: [
       { id: 'enable_nfo', path: 'output.nfo', label: '生成 NFO', desc: '供 Jellyfin / Kodi 识别', tip: TIP.nfo },
+      { id: 'enable_srt', path: 'output.srt', label: '生成 SRT 字幕', desc: '生成同名 .srt 字幕文件', tip: TIP.srt },
       { id: 'write_metadata', path: 'output.metadata', label: 'ExifTool 写元数据', desc: '把标题写进视频内部属性', tip: TIP.exiftool },
       { id: 'move_failed', path: 'output.move_failed', label: '失败移入 _failed', desc: '失败文件集中存放，便于复查', tip: '' },
     ],
@@ -109,6 +110,13 @@ const ADVANCED_FIELDS = [
   { path: 'frames.workers', label: '抽帧并发 frames.workers', type: 'number', step: '1', min: '1', tip: TIP.ffmpeg },
   { path: 'whisper.model', label: 'Whisper 模型', type: 'text', tip: TIP.whisper },
   { path: 'whisper.device', label: 'Whisper 设备 whisper.device', type: 'select', options: ['auto', 'cuda', 'cpu'] },
+  {
+    path: 'whisper.language',
+    label: '转写 / 字幕语言',
+    type: 'select',
+    options: ['auto', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'pt', 'it', 'ar'],
+    hint: 'auto = 自动检测；同时决定 .srt 字幕的语言',
+  },
   { path: 'whisper.compute_type', label: '计算精度 whisper.compute_type', type: 'text', hint: '如 int8_float16 / float16' },
   { path: 'whisper.workers', label: '转写并发 whisper.workers', type: 'number', step: '1', min: '1' },
   { path: 'runtime.ai_workers', label: 'AI 并发 runtime.ai_workers', type: 'number', step: '1', min: '1' },
@@ -414,6 +422,26 @@ export function createView(ctx) {
     const refreshBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '刷新状态' });
     refreshBtn.addEventListener('click', () => refreshEnv(false));
 
+    const installBtn = h('button', { class: 'btn', type: 'button', text: '安装 Whisper 依赖' });
+    installBtn.addEventListener('click', async () => {
+      const old = installBtn.textContent;
+      installBtn.disabled = true;
+      installBtn.textContent = '安装中…';
+      out.textContent = '正在安装 faster-whisper 到 libs/（使用上方 pip 镜像源）…';
+      try {
+        const r = await apiClient.installWhisper();
+        for (const line of (r.logs || [])) out.appendChild(h('div', { class: 'env-log', text: line }));
+        toast(r.ok ? 'Whisper 依赖已就绪' : '安装未完成，请查看状态', r.ok ? 'ok' : 'warn', 4000);
+        await refreshEnv(true);
+      } catch (err) {
+        out.textContent = `安装失败：${(err && (err.message || err.detail)) || '未知错误'}`;
+        toast('Whisper 依赖安装失败', 'err');
+      } finally {
+        installBtn.disabled = false;
+        installBtn.textContent = old;
+      }
+    });
+
     const fixBtn = h('button', { class: 'btn', type: 'button', text: '下载 / 修复 CUDA 库' });
     fixBtn.addEventListener('click', async () => {
       const old = fixBtn.textContent;
@@ -441,7 +469,87 @@ export function createView(ctx) {
         refreshBtn,
       ]),
       out,
-      h('div', { class: 'control-row' }, [fixBtn]),
+      h('div', { class: 'control-row' }, [installBtn, fixBtn]),
+    ]);
+  }
+
+  // ---------- 下载镜像（国内加速） ----------
+  const MIRROR_PRESETS = {
+    pip: {
+      official: 'https://pypi.org/simple',
+      tsinghua: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+      aliyun: 'https://mirrors.aliyun.com/pypi/simple',
+      ustc: 'https://pypi.mirrors.ustc.edu.cn/simple',
+      tencent: 'https://mirrors.cloud.tencent.com/pypi/simple',
+    },
+    hf: {
+      official: 'https://huggingface.co',
+      'hf-mirror': 'https://hf-mirror.com',
+      modelscope: 'https://www.modelscope.cn',
+    },
+  };
+
+  function buildMirrorRow(label, cfgPath, presets, hint) {
+    const input = h('input', {
+      class: 'field-input',
+      type: 'text',
+      value: getPath(store.state.config, cfgPath, '') || '',
+      placeholder: '留空 = 官方源',
+    });
+    input.addEventListener('change', () => {
+      commit(setPath(store.state.config, cfgPath, input.value.trim()));
+    });
+    fieldRefs.push({ field: { path: cfgPath }, input, kind: 'input' });
+
+    const chips = h('div', { class: 'model-chips' });
+    for (const name of Object.keys(presets)) {
+      const url = presets[name];
+      const chip = h('button', {
+        class: 'model-chip' + (input.value === url ? ' is-active' : ''),
+        type: 'button',
+        text: name,
+        title: url,
+      });
+      chip.addEventListener('click', () => {
+        input.value = url;
+        commit(setPath(store.state.config, cfgPath, url));
+        toast(`已设为 ${name}`, 'ok');
+      });
+      chips.appendChild(chip);
+    }
+    const reset = h('button', { class: 'model-chip', type: 'button', text: '清空', title: '清空并使用官方源' });
+    reset.addEventListener('click', () => {
+      input.value = '';
+      commit(setPath(store.state.config, cfgPath, ''));
+      toast('已恢复官方源', 'info');
+    });
+    chips.appendChild(reset);
+
+    return h('div', { class: 'field' }, [
+      h('div', { class: 'field-label', text: label }),
+      input,
+      h('div', { class: 'field-hint', text: hint }),
+      chips,
+    ]);
+  }
+
+  function buildMirrorPanel() {
+    const grid = h('div', { class: 'form-grid' });
+    grid.appendChild(buildMirrorRow(
+      'pip 源 runtime.pip_index', 'runtime.pip_index', MIRROR_PRESETS.pip,
+      '依赖下载（pip install）使用的镜像源，可自定义填任意地址',
+    ));
+    grid.appendChild(buildMirrorRow(
+      'HuggingFace 端点 runtime.hf_endpoint', 'runtime.hf_endpoint', MIRROR_PRESETS.hf,
+      '模型下载使用的端点（如 hf-mirror.com），可自定义',
+    ));
+    return h('div', { class: 'panel' }, [
+      h('div', { class: 'panel-head' }, [
+        h('span', { class: 'panel-title', text: '下载镜像（国内加速）' }),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'panel-hint', text: '依赖与模型下载走这里设置的源' }),
+      ]),
+      grid,
     ]);
   }
 
@@ -526,6 +634,7 @@ export function createView(ctx) {
       buildFormPanel('AI 配置', '严格对齐 config.json 的 ai 结构', AI_FIELDS),
       buildAITestPanel(),
       buildFormPanel('高级参数', 'frames / whisper / naming / runtime', ADVANCED_FIELDS),
+      buildMirrorPanel(),
       buildEnvPanel(),
       buildGlossary(),
     ]);
