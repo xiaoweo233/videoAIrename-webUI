@@ -180,6 +180,11 @@ export class ApiClient {
   getMirrors() {
     return this.get('/mirrors');
   }
+
+  /** 查询服务监听方式（本机 / 局域网地址） */
+  serverInfo() {
+    return this.get('/server');
+  }
 }
 
 /** 单例客户端 */

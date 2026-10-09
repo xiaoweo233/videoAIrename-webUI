@@ -9,13 +9,19 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from pathlib import Path
+from typing import Callable, Iterator, List, Optional
 
-__all__ = ["TranscriptResult", "WhisperEngine", "segments_to_srt", "is_available"]
+__all__ = [
+    "TranscriptResult", "WhisperEngine", "segments_to_srt", "is_available",
+    "resolve_local_model",
+]
 
 
 @dataclass
@@ -78,6 +84,130 @@ def is_available() -> bool:
         return importlib.util.find_spec("faster_whisper") is not None
     except (ImportError, ValueError):
         return False
+
+
+def _model_repo_slug(model_name: str) -> str:
+    """把模型名映射成 HF 缓存目录名，如 large-v3-turbo →
+    models--mobiuslabsgmbh--faster-whisper-large-v3-turbo。"""
+    name = str(model_name or "").strip()
+    if not name:
+        return ""
+    repo = ""
+    try:
+        from faster_whisper.utils import _MODELS  # type: ignore
+
+        repo = _MODELS.get(name.lower()) or _MODELS.get(name) or ""
+    except Exception:  # noqa: BLE001 - 映射表缺失时退化为按名字推导
+        repo = ""
+    if not repo:
+        repo = name
+    return "models--" + repo.replace("/", "--")
+
+
+def resolve_local_model(model_name: str, download_root: Optional[str]) -> str:
+    """在本地缓存里定位已下载完成的模型目录，找不到返回空串。
+
+    为什么必须这么做：faster-whisper 收到「模型名」时会走
+    `download_model → huggingface_hub.snapshot_download`，而 snapshot_download
+    **无条件**先请求仓库接口（`api.repo_info`）。只要 HF_ENDPOINT 指向非
+    HuggingFace 兼容端点（例如 www.modelscope.cn 只有网页接口），返回的 HTML
+    会让 `r.json()` 抛 JSONDecodeError —— 哪怕模型已完整缓存也照样失败。
+    改成直接传「目录」，faster-whisper 会跳过一切网络请求（transcribe.py: os.path.isdir
+    分支），离线可用。
+    """
+    if not download_root:
+        return ""
+    root = Path(download_root)
+    if not root.is_dir():
+        return ""
+
+    def _valid(snap: Path) -> bool:
+        return (snap / "model.bin").is_file() and (snap / "config.json").is_file()
+
+    slug = _model_repo_slug(model_name)
+    roots = []
+    if slug:
+        roots.append(root / slug)
+    roots.extend(sorted((d for d in root.glob("models--*") if d.is_dir()),
+                        key=lambda d: d.name))
+
+    best = ""
+    best_mtime = -1.0
+    for repo_dir in roots:
+        snaps = repo_dir / "snapshots"
+        if not snaps.is_dir():
+            continue
+        for snap in snaps.iterdir():
+            if not snap.is_dir() or not _valid(snap):
+                continue
+            try:
+                mtime = snap.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            if mtime > best_mtime:
+                best, best_mtime = str(snap), mtime
+        if best:
+            break  # 命中精确 slug 就不再退而求其次
+    return best
+
+
+def _friendly_error(exc: Exception) -> str:
+    """把底层异常翻译成用户能直接照做的说明。"""
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            f"模型缓存接口返回的不是 JSON（{exc}）。原因通常是 runtime.hf_endpoint "
+            "指向了非 HuggingFace 兼容的端点（如 www.modelscope.cn 只有网页接口，"
+            "不提供 HF 的 /api/models 接口）。请改用 https://hf-mirror.com，"
+            "或留空使用官方源。"
+        )
+    return str(exc)
+
+
+def _is_source_error(exc: Exception) -> bool:
+    """判定「模型来源类」错误：换设备重试也没用，不必再跑一次 CPU 加载。"""
+    if isinstance(exc, (json.JSONDecodeError, FileNotFoundError)):
+        return True
+    text = str(exc)
+    return "Invalid model size" in text or "not a local folder" in text
+
+
+def _hf_endpoint_issue() -> str:
+    """当前 HF_ENDPOINT 是否不兼容（返回提示语，空串表示没问题）。"""
+    try:
+        from ..infra import bootstrap
+
+        return bootstrap.hf_endpoint_issue()
+    except Exception:  # noqa: BLE001 - bootstrap 不可用时不阻断加载
+        return ""
+
+
+@contextmanager
+def _hf_endpoint_guard(on_warn: "Callable[[str], None]") -> "Iterator[None]":
+    """模型未本地缓存时必须联网；若 HF_ENDPOINT 不兼容则临时改用 hf-mirror。
+
+    modelscope.cn 之类的站点没有 /api/models，会让 snapshot_download 拿回 HTML
+    并抛 JSONDecodeError。这里只在本次加载期间改写环境变量，用完即还原。
+    """
+    current = os.environ.get("HF_ENDPOINT", "").strip()
+    fallback = "https://hf-mirror.com"
+    if not current or not _hf_endpoint_issue():
+        yield
+        return
+    if current.rstrip("/").lower() == fallback:
+        yield
+        return
+    try:
+        on_warn(f"HF_ENDPOINT={current} 不是 HuggingFace 兼容端点，本次模型下载临时改用 {fallback}")
+    except Exception:  # noqa: BLE001
+        pass
+    os.environ["HF_ENDPOINT"] = fallback
+    try:
+        yield
+    finally:
+        if current:
+            os.environ["HF_ENDPOINT"] = current
+        else:
+            os.environ.pop("HF_ENDPOINT", None)
 
 
 def _cuda_libs_present() -> bool:
@@ -147,6 +277,8 @@ class WhisperEngine:
         self._actual_compute = ""
         self._load_lock = threading.Lock()
         self._load_error = ""
+        self._load_failed = False   # 终态失败：避免每个视频都重试一次（含网络请求）
+        self._local_model_path = ""
 
     # ---------- 日志 ----------
     def _log(self, level: str, msg: str) -> None:
@@ -193,53 +325,75 @@ class WhisperEngine:
         """惰性加载模型；成功返回 True。线程安全。"""
         if self._model is not None:
             return True
+        # 终态失败后不再重试：否则每个文件都会重新走一次（可能联网的）加载流程
+        if self._load_failed:
+            return False
         with self._load_lock:
             if self._model is not None:
                 return True
+            if self._load_failed:
+                return False
             if not is_available():
                 self._load_error = "faster-whisper 未安装"
+                self._load_failed = True
                 self._log("WARN", "Whisper 不可用：faster-whisper 未安装，已降级为纯画面分析")
                 return False
 
             device, compute = self._resolve_device()
-            try:
+            # 本地缓存优先：直接把模型目录喂给 faster-whisper，彻底绕开网络
+            self._local_model_path = resolve_local_model(self.model_name, self.download_root)
+            source = self._local_model_path or self.model_name
+            if self._local_model_path:
+                self._log("INFO", f"发现本地模型缓存，离线加载：{self._local_model_path}")
+
+            def _open(src: str, dev: str, cpt: str):
                 from faster_whisper import WhisperModel  # type: ignore
 
-                self._log("INFO", f"正在加载 Whisper 模型 {self.model_name}（device={device}, compute={compute}）...")
-                self._model = WhisperModel(
-                    self.model_name,
-                    device=device,
-                    compute_type=compute,
+                return WhisperModel(
+                    src, device=dev, compute_type=cpt,
                     download_root=self.download_root,
                 )
+
+            def _guard():
+                # 本地目录加载不走网络，无需换源；只有按「模型名」下载才需要
+                if self._local_model_path:
+                    return nullcontext()
+                return _hf_endpoint_guard(lambda m: self._log("WARN", m))
+
+            try:
+                self._log("INFO", f"正在加载 Whisper 模型 {self.model_name}（device={device}, compute={compute}）...")
+                with _guard():
+                    self._model = _open(source, device, compute)
                 self._actual_device = device
                 self._actual_compute = compute
                 self._log("INFO", f"Whisper 就绪：{self.model_name} · {device} · {compute}")
                 return True
             except Exception as exc:  # noqa: BLE001 - 模型加载失败不致命
-                self._load_error = str(exc)
-                self._log("WARN", f"Whisper 模型加载失败（{device}）：{exc}")
-                # GPU 失败时再试一次 CPU
-                if device == "cuda":
+                self._load_error = _friendly_error(exc)
+                self._log("WARN", f"Whisper 模型加载失败（{device}）：{self._load_error}")
+                # 只有「设备相关」失败才值得换 CPU 再试；来源类错误重试必然同样失败
+                if device == "cuda" and not _is_source_error(exc):
                     try:
-                        from faster_whisper import WhisperModel  # type: ignore
                         self._log("INFO", "尝试回退 CPU 加载 Whisper 模型 ...")
-                        self._model = WhisperModel(
-                            self.model_name, device="cpu", compute_type="int8",
-                            download_root=self.download_root,
-                        )
+                        with _guard():
+                            self._model = _open(source, "cpu", "int8")
                         self._actual_device = "cpu"
                         self._actual_compute = "int8"
                         self._log("INFO", "Whisper 已回退 CPU 加载成功")
                         return True
                     except Exception as exc2:  # noqa: BLE001
-                        self._load_error = str(exc2)
-                        self._log("ERROR", f"Whisper CPU 回退也失败：{exc2}")
+                        self._load_error = _friendly_error(exc2)
+                        self._log("ERROR", f"Whisper CPU 回退也失败：{self._load_error}")
+                self._load_failed = True
                 return False
 
     @property
     def device(self) -> str:
         return self._actual_device or (self.requested_device or "auto")
+
+    @property
+    def local_model_path(self) -> str:
+        return self._local_model_path
 
     @property
     def load_error(self) -> str:

@@ -1,36 +1,106 @@
 ' =====================================================
-' è§†é¢‘ AI é‡å‘½ååŠ©æ‰‹ â€” å¯åŠ¨è„šæœ¬ï¼ˆVBS æ— æ§åˆ¶å°ç‰ˆï¼‰
-' åŒå‡»è¿è¡Œï¼Œä¸æ˜¾ç¤ºé»‘çª—å£
+' ÊÓÆµ AI ÖØÃüÃûÖúÊÖ ¡ª Æô¶¯½Å±¾£¨VBS ÎŞ¿ØÖÆÌ¨°æ£©
+' Ë«»÷ÔËĞĞ£¬²»ÏÔÊ¾ºÚ´°¿Ú£»Æô¶¯Ê§°Ü»áµ¯³öÈÕÖ¾Î²²¿£¬±ãÓÚÅÅ´í
+'
+' ×¢Òâ£º±¾ÎÄ¼ş±ØĞëÒÔ ANSI(GBK) ±£´æ¡£Windows ½Å±¾ËŞÖ÷(WSH)Ö»ÈÏ
+'       ANSI »ò UTF-16LE£¬´æ³É UTF-8 »áÒò¶à×Ö½ÚĞòÁĞ±»°´ GBK Îó¶Á
+'       ¶ø±¨¡¸ÎŞĞ§×Ö·û / È±ÉÙÓï¾ä¡¹¡ª¡ª Ö®Ç°µÄÆô¶¯±¨´í¾ÍÊÇÕâÃ´À´µÄ¡£
 ' =====================================================
 Option Explicit
 
-Dim shell, fso, appRoot, pyCmd, cmd
+Dim shell, fso, appRoot, pyCmd, cmd, logFile, port
+Dim ok, i, body, tail
+
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 appRoot = fso.GetParentFolderName(WScript.ScriptFullName)
 shell.CurrentDirectory = appRoot
+port = "8000"
 
-' æŒ‰ä¼˜å…ˆçº§æ‰¾ Python
+' ---------- ÈÕÖ¾ÎÄ¼ş£¨°Ñ³ÌĞòÊä³öÂäÅÌ£¬¾²Ä¬Æô¶¯Ò²ÄÜÅÅ´í£© ----------
+Dim logDir
+logDir = fso.BuildPath(appRoot, "logs")
+If Not fso.FolderExists(logDir) Then fso.CreateFolder(logDir)
+logFile = fso.BuildPath(logDir, "start.log")
+
+' ---------- °´ÓÅÏÈ¼¶ÕÒ Python ----------
+' ÏÈÓÃ python.exe£¨¿ÉÖØ¶¨ÏòÊä³ö£©£»Ö»ÓĞ pythonw Ê±ÍË¶øÇóÆä´Î£¨ÎŞÈÕÖ¾£©
 pyCmd = ""
-If fso.FileExists(appRoot & "\python\pythonw.exe") Then
-    pyCmd = appRoot & "\python\pythonw.exe"
-ElseIf fso.FileExists(appRoot & "\python\python.exe") Then
-    pyCmd = appRoot & "\python\python.exe"
-ElseIf fso.FileExists(appRoot & "\venv\Scripts\pythonw.exe") Then
-    pyCmd = appRoot & "\venv\Scripts\pythonw.exe"
+If fso.FileExists(fso.BuildPath(appRoot, "python\python.exe")) Then
+    pyCmd = fso.BuildPath(appRoot, "python\python.exe")
+ElseIf fso.FileExists(fso.BuildPath(appRoot, "venv\Scripts\python.exe")) Then
+    pyCmd = fso.BuildPath(appRoot, "venv\Scripts\python.exe")
+ElseIf fso.FileExists(fso.BuildPath(appRoot, "python\pythonw.exe")) Then
+    pyCmd = fso.BuildPath(appRoot, "python\pythonw.exe")
+ElseIf fso.FileExists(fso.BuildPath(appRoot, "venv\Scripts\pythonw.exe")) Then
+    pyCmd = fso.BuildPath(appRoot, "venv\Scripts\pythonw.exe")
 Else
     pyCmd = "pythonw"
 End If
 
-' 3 ç§’åæ‰“å¼€æµè§ˆå™¨
-shell.Run "cmd /c timeout /t 3 >nul & start http://127.0.0.1:8000/", 0, False
+Function QQ(s)
+    QQ = """" & s & """"
+End Function
 
-' 0 = éšè—çª—å£
-cmd = """" & pyCmd & """ """ & appRoot & "\run.py"" --port 8000"
+' ---------- Æô¶¯·şÎñ£¨Òş²Ø´°¿Ú + Êä³öÖØ¶¨Ïòµ½ÈÕÖ¾£© ----------
+If InStr(LCase(pyCmd), "pythonw") > 0 Then
+    cmd = QQ(pyCmd) & " " & QQ(fso.BuildPath(appRoot, "run.py")) & " --port " & port
+Else
+    cmd = "cmd /c " & QQ(pyCmd) & " " & QQ(fso.BuildPath(appRoot, "run.py")) & _
+          " --port " & port & " > " & QQ(logFile) & " 2>&1"
+End If
+
 On Error Resume Next
 shell.Run cmd, 0, False
 If Err.Number <> 0 Then
-    MsgBox "å¯åŠ¨å¤±è´¥ï¼š" & Err.Description & vbCrLf & _
-           "è¯·ç¡®è®¤å·²å®‰è£… Python 3.11+ï¼Œæˆ–æŠŠä¾¿æºç‰ˆ Python æ”¾åˆ° python\ ç›®å½•ã€‚", 16, "è§†é¢‘ AI é‡å‘½ååŠ©æ‰‹"
+    MsgBox "Æô¶¯Ê§°Ü£º" & Err.Description & vbCrLf & vbCrLf & _
+           "ÇëÈ·ÈÏÒÑ°²×° Python 3.11+£¬»ò°Ñ±ãĞ¯°æ Python ·Åµ½ python\ Ä¿Â¼¡£", _
+           16, "ÊÓÆµ AI ÖØÃüÃûÖúÊÖ"
+    WScript.Quit 1
 End If
+On Error GoTo 0
+
+' ---------- µÈ´ı·şÎñ¾ÍĞ÷£¨×î¶à 60 Ãë£© ----------
+ok = False
+For i = 1 To 60
+    WScript.Sleep 1000
+    If HttpOk("http://127.0.0.1:" & port & "/api/health") Then
+        ok = True
+        Exit For
+    End If
+Next
+
+If Not ok Then
+    tail = ""
+    If fso.FileExists(logFile) Then
+        On Error Resume Next
+        body = fso.OpenTextFile(logFile, 1, False).ReadAll
+        On Error GoTo 0
+        If Len(body) > 1500 Then body = Right(body, 1500)
+        tail = body
+    End If
+    MsgBox "·şÎñÆô¶¯Ê§°Ü£¨60 ÃëÎ´¾ÍĞ÷£©¡£" & vbCrLf & _
+           "ÍêÕûÈÕÖ¾£º" & logFile & vbCrLf & vbCrLf & _
+           "ÈÕÖ¾Î²²¿£º" & vbCrLf & tail, _
+           16, "ÊÓÆµ AI ÖØÃüÃûÖúÊÖ"
+    WScript.Quit 1
+End If
+
+' ---------- ´ò¿ªä¯ÀÀÆ÷ ----------
+shell.Run "http://127.0.0.1:" & port & "/", 1, False
+
+Function HttpOk(url)
+    On Error Resume Next
+    Dim http
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    If Err.Number <> 0 Then
+        HttpOk = False
+        Exit Function
+    End If
+    http.SetTimeouts 800, 800, 800, 800
+    http.Open "GET", url, False
+    http.Send
+    HttpOk = (http.Status = 200)
+    On Error GoTo 0
+End Function

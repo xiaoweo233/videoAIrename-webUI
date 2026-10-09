@@ -152,6 +152,64 @@ async def health() -> Dict[str, Any]:
     }
 
 
+def _env_port(default: int = 8000) -> int:
+    try:
+        return int(os.environ.get("VAIR_PORT", "") or default)
+    except ValueError:
+        return default
+
+
+# 初值同时读环境变量：uvicorn --reload 会另起子进程，模块级赋值传不过去
+SERVER_INFO: Dict[str, Any] = {
+    "host": os.environ.get("VAIR_HOST", "127.0.0.1"),
+    "port": _env_port(),
+}
+
+
+def set_server_info(host: str, port: int) -> None:
+    """由 run.py 注入实际监听地址（供前端展示访问方式）。"""
+    SERVER_INFO["host"] = host or "127.0.0.1"
+    SERVER_INFO["port"] = int(port or 0)
+    os.environ["VAIR_HOST"] = SERVER_INFO["host"]
+    os.environ["VAIR_PORT"] = str(SERVER_INFO["port"])
+
+
+def _lan_ips(limit: int = 6) -> list:
+    """列出本机局域网 IPv4（去重、排除回环）。"""
+    import socket
+
+    ips = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip.startswith("127.") or ip in ips:
+                continue
+            ips.append(ip)
+            if len(ips) >= limit:
+                break
+    except OSError:
+        pass
+    return ips
+
+
+@app.get("/api/server")
+async def server_info() -> Dict[str, Any]:
+    """当前服务监听方式与可访问地址（用于设置页的「局域网访问」开关）。"""
+    host = SERVER_INFO["host"]
+    port = SERVER_INFO["port"]
+    lan = host not in ("127.0.0.1", "localhost")
+    cfg_lan = bool(config.runtime.get("lan", False))
+    return {
+        "host": host,
+        "port": port,
+        "lan": lan,
+        "config_lan": cfg_lan,          # 配置值（重启后生效）
+        "restart_required": lan != cfg_lan,
+        "local_url": f"http://127.0.0.1:{port}/",
+        "lan_urls": [f"http://{ip}:{port}/" for ip in _lan_ips()] if lan else [],
+    }
+
+
 @app.get("/api/runtime")
 async def runtime_report() -> Dict[str, Any]:
     return bootstrap.probe_runtime().as_dict()

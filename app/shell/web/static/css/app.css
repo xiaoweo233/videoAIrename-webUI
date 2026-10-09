@@ -704,6 +704,10 @@ textarea {
   font-size: 11.5px;
   color: var(--text-mute);
 }
+.field-hint.warn-text {
+  color: var(--warn, #d9861b);
+  grid-column: 1 / -1;
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

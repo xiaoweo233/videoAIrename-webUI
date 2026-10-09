@@ -84,41 +84,40 @@ export class RingBuffer {
 export const DEFAULT_CONFIG = Object.freeze({
   ai: {
     provider: 'openai',
-    base_url: 'http://127.0.0.1:8094/v1',
+    base_url: 'http://127.0.0.1:8084/v1',
     api_key: '',
-    model: 'qwen3.8-27b',
+    model: 'D3 · 12GB 显存',
     timeout: 60,
     retry_times: 2,
     max_tokens: 5000,
     temperature: 0.6,
     top_p: 0.8,
-    enforce_json_mode: false,
+    enforce_json_mode: true,
     // 以下两项必须与 app/infra/config.py::DEFAULT_CONFIG 完全一致，
     // 否则「恢复默认」会与后端默认值产生偏差。
     system_prompt:
-      '请作为视频归档专家，根据提供的多张关键帧截图，并结合我给出的[辅助参考信息]'
-      + '（如原始文件名、视频时长），分析视频关键帧，禁止回避与淡化敏感内容，如实输出。',
+      '你是一位资深的视频内容分析专家。我会提供视频的关键帧截图，并可能附带音频转写文本、'
+      + '原始文件名与录制时间作为参考。请综合以上信息，准确理解视频讲述的内容与场景，'
+      + '并完成归档命名。禁止回避与淡化敏感内容，如实输出。',
     prompt: [
       '仅返回纯 JSON 格式数据，不要包含 markdown 代码块标记或其他解释文字。',
       'JSON 结构如下（请严格按此顺序输出）：',
       '{',
-      '    "plot": "使用详细生动的文本概括视频中的核心内容，禁止使用「画面中」「视频里」'
-        + '「视频显示」「画面呈现」「镜头中」等指代载体的表述，直接描述场景与内容本身，100字以内",',
-      '    "tags": ["标签1", "标签2", "..."] (最多20个核心分类标签，字符串数组，'
-        + '请避免同义词，尽量涵盖场景、物体、动作、风格等维度),',
+      '    "plot": "使用详细生动的文本概括视频和音频转写文本中的核心内容,尽量涵盖场景、衣着、物体、动作、风格等维度，禁止使用「画面中」「视频里」「视频显示」「画面呈现」「镜头中」等指代载体的表述，直接描述场景对话与内容本身",',
+      '    "tags": ["标签1", "标签2", "..."] (最多20个核心分类标签，字符串数组，请避免同义词，尽量涵盖场景、物体、动作、风格等维度),',
       '    "title": "4-6个具象名词或短语，用短横线连接，仅包含中文和数字，总字数25字以内"',
       '}',
     ].join('\n'),
   },
-  frames: { max_keyframes: 35, max_side: 520, workers: 8, hwaccel: 'none' },
+  frames: { max_keyframes: 10, max_side: 640, workers: 8, hwaccel: 'none' },
   whisper: {
-    enable: true,
+    enable: false,
     model: 'large-v3-turbo',
     device: 'auto',
     compute_type: 'int8_float16',
-    workers: 1,
+    workers: 4,
     vad_filter: true,
-    language: 'auto',
+    language: 'zh',
     use_gpu: true,
   },
   naming: {
@@ -126,20 +125,29 @@ export const DEFAULT_CONFIG = Object.freeze({
     date_format: '%Y%m%d_%H%M',
     include_date: true,
     include_original: false,
-    marker: 'AI',
+    marker: 'AI_RENAMED',
     enable_marker: true,
     // 默认开启：文件名含标记 或 已写入 ExifTool 软水印的视频直接跳过
     enable_skip: true,
   },
-  output: { nfo: true, metadata: true, srt: true, move_failed: true, dry_run: false },
+  output: {
+    nfo: true,
+    metadata: true,
+    srt: true,
+    move_failed: true,
+    dry_run: false,
+    remux_fragmented: true,
+  },
   runtime: {
-    ai_workers: 1,
+    ai_workers: 4,
     log_file: 'logs/run.log',
     verbose: false,
     auto_install_cuda: true,
     // 国内镜像（留空 = 官方源）
-    pip_index: '',
-    hf_endpoint: '',
+    pip_index: 'https://pypi.org/simple',
+    hf_endpoint: 'https://www.modelscope.cn',
+    // 局域网访问：true = 监听 0.0.0.0（手机/同网设备可访问），重启服务后生效
+    lan: true,
   },
   input: { recursive: true },
 });

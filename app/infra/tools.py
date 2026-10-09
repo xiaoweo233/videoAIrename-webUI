@@ -21,6 +21,7 @@ __all__ = [
     "ToolPaths", "ProbeResult", "resolve_tools", "probe_video", "extract_frame",
     "extract_frame_bytes", "extract_audio", "write_metadata", "read_metadata",
     "build_exiftool_command", "run", "ToolError",
+    "is_fragmented_mp4", "remux_mp4",
 ]
 
 # 子进程统一环境：强制 UTF-8、禁用交互
@@ -314,6 +315,100 @@ def extract_audio(
     except ToolError:
         return False
     return proc.returncode == 0 and os.path.exists(out_path)
+
+
+# ------------------------------------------------------------------
+# 分片封装（fMP4）处理
+# ------------------------------------------------------------------
+_FRAGMENTED_EXTS = frozenset((".mp4", ".mov", ".m4v"))
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        os.unlink(str(path))
+    except OSError:
+        pass
+
+
+def is_fragmented_mp4(video_path: str, *, scan_bytes: int = 8 * 1024 * 1024) -> bool:
+    """判断是否为分片封装（fMP4）的 MP4 / MOV。
+
+    OBS 的「分片 MP4」与录制中断产物的结构为
+    `ftyp + moov(含 mvex) + moof + mdat ...`，而普通 MP4 只有 `ftyp + moov + mdat`。
+    ExifTool 目前无法写入分片文件（Can't yet handle movie fragments when writing），
+    必须先无损重封装，因此这里只需要「头部是否出现 moof」这一个判据。
+    """
+    if os.path.splitext(str(video_path))[1].lower() not in _FRAGMENTED_EXTS:
+        return False
+    try:
+        from .paths import to_long_path
+
+        with open(to_long_path(str(video_path)), "rb") as fh:
+            head = fh.read(scan_bytes)
+    except OSError:
+        return False
+    return b"moov" in head and b"moof" in head
+
+
+def remux_mp4(
+    tools: ToolPaths,
+    video_path: str,
+    *,
+    timeout: float = 900,
+) -> Tuple[bool, str]:
+    """把分片封装（fMP4）无损重封装成标准 MP4，并就地替换原文件。
+
+    只换容器不重编码（`-c copy`），速度接近磁盘拷贝速度且画质无损；
+    重封装后 ExifTool 即可正常写入元数据。
+
+    安全约束：产物落同目录临时文件，校验体积合理后再 `os.replace` 原子替换，
+    任何一步失败都保留原文件不动。
+    返回 (是否成功, 错误信息)。注意：不会还原时间戳，调用方需自行 preserve/restore。
+    """
+    if not tools.ffmpeg:
+        return False, "ffmpeg 不可用"
+    src = Path(str(video_path))
+    try:
+        src_size = src.stat().st_size
+    except OSError as exc:
+        return False, f"无法读取源文件：{exc}"
+
+    tmp = src.with_name(src.stem + ".__remux__.mp4")
+    _safe_unlink(tmp)
+    cmd = [
+        tools.ffmpeg, "-y", "-nostdin",
+        "-i", str(src),
+        "-map", "0", "-c", "copy",
+        "-movflags", "+faststart",
+        "-f", "mp4", str(tmp),
+    ]
+    try:
+        proc = run(cmd, timeout=timeout)
+    except ToolError as exc:
+        _safe_unlink(tmp)
+        return False, str(exc)
+
+    if proc.returncode != 0 or not tmp.is_file():
+        _safe_unlink(tmp)
+        detail = _clean_stderr(proc.stderr or b"")[:300]
+        return False, detail or f"ffmpeg 重封装失败（退出码 {proc.returncode}）"
+    try:
+        out_size = tmp.stat().st_size
+    except OSError:
+        _safe_unlink(tmp)
+        return False, "重封装产物不可读"
+    # 体积校验：重封装只会让体积接近原文件（±少量 moof 开销），
+    # 大幅缩水说明流没拷全，绝不能替换原文件。
+    if out_size < max(1, int(src_size * 0.5)):
+        _safe_unlink(tmp)
+        return False, f"重封装产物异常（{out_size} 字节 < 源文件 {src_size} 的一半），已放弃替换"
+
+    try:
+        os.replace(str(tmp), str(src))
+    except OSError as exc:
+        _safe_unlink(tmp)
+        return False, f"替换原文件失败：{exc}"
+    return True, ""
 
 
 # ------------------------------------------------------------------

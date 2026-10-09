@@ -25,6 +25,7 @@ __all__ = [
     "early_init", "ensure_runtime", "probe_runtime", "download_hf_model",
     "RuntimeReport", "cuda_libs_status", "ensure_cuda_libs", "apply_mirrors",
     "mirror_config", "PIP_PRESETS", "HF_PRESETS", "install_whisper",
+    "hf_endpoint_issue",
 ]
 
 # ------------------------------------------------------------------
@@ -41,11 +42,42 @@ PIP_PRESETS = {
 HF_PRESETS = {
     "official": "https://huggingface.co",
     "hf-mirror": "https://hf-mirror.com",
-    "modelscope": "https://www.modelscope.cn",
 }
+# 注意：www.modelscope.cn 不是 HuggingFace 兼容端点（只有网页接口，没有
+# /api/models 系列 JSON 接口）。把它填进 HF_ENDPOINT 会让
+# huggingface_hub.snapshot_download → api.repo_info 拿到 HTML 后抛
+# JSONDecodeError("Expecting value: line 1 column 1 (char 0)")，即使模型已缓存。
+# 这里保留识别，命中时给出明确提示而不是让用户对着 JSON 报错发懵。
+_HF_INCOMPATIBLE_HOSTS = ("modelscope.cn", "modelscope.com")
 
 _PIP_INDEX: str = ""
 _HF_ENDPOINT: str = ""
+_HF_ENDPOINT_WARNING: str = ""
+
+
+def _hf_endpoint_warning(endpoint: str) -> str:
+    host = ""
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(endpoint).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        host = ""
+    for bad in _HF_INCOMPATIBLE_HOSTS:
+        if host.endswith(bad):
+            return (f"{endpoint} 不是 HuggingFace 兼容端点，模型下载/缓存校验会失败"
+                    "（报 Expecting value: line 1 column 1）。建议改用 https://hf-mirror.com")
+    return ""
+
+
+def hf_endpoint_issue(endpoint: "str | None" = None) -> str:
+    """当前 HF_ENDPOINT 的兼容性提示；空串表示可用。
+
+    供 whisper 引擎在「必须联网下载模型」时判断是否需要临时换源。
+    """
+    ep = (endpoint if endpoint is not None
+          else (_HF_ENDPOINT or os.environ.get("HF_ENDPOINT", ""))).strip()
+    return _hf_endpoint_warning(ep)
 
 
 def apply_mirrors(pip_index: "str | None" = None, hf_endpoint: "str | None" = None) -> dict:
@@ -54,9 +86,10 @@ def apply_mirrors(pip_index: "str | None" = None, hf_endpoint: "str | None" = No
     - pip_index → 影响 _pip_install（-i 参数）
     - hf_endpoint → 设置 HF_ENDPOINT，影响 huggingface_hub 模型下载
     """
-    global _PIP_INDEX, _HF_ENDPOINT
+    global _PIP_INDEX, _HF_ENDPOINT, _HF_ENDPOINT_WARNING
     _PIP_INDEX = (pip_index or "").strip()
     _HF_ENDPOINT = (hf_endpoint or "").strip()
+    _HF_ENDPOINT_WARNING = _hf_endpoint_warning(_HF_ENDPOINT)
 
     if _HF_ENDPOINT:
         os.environ["HF_ENDPOINT"] = _HF_ENDPOINT
@@ -83,6 +116,7 @@ def apply_mirrors(pip_index: "str | None" = None, hf_endpoint: "str | None" = No
 def mirror_config() -> dict:
     """当前生效的镜像配置。"""
     return {"pip_index": _PIP_INDEX, "hf_endpoint": _HF_ENDPOINT,
+            "hf_endpoint_warning": _HF_ENDPOINT_WARNING,
             "pip_presets": PIP_PRESETS, "hf_presets": HF_PRESETS}
 
 _INITIALIZED = False

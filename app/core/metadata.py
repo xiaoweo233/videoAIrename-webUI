@@ -11,7 +11,7 @@ import os
 import platform
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape
 
 from ..infra.paths import to_long_path
@@ -30,6 +30,22 @@ SOFTWARE_MARKER = "AIVideoRenameV1"
 # ==================================================================
 # ExifTool 元数据写入
 # ==================================================================
+def _emit(on_log: Optional[Callable[[str, str], None]], level: str, msg: str) -> None:
+    if not on_log:
+        return
+    try:
+        on_log(level, msg)
+    except Exception:  # noqa: BLE001 - 日志回调失败不影响主流程
+        pass
+
+
+def _is_fragment_error(err: str) -> bool:
+    """ExifTool 对分片封装 MP4 的报错：
+    `Error: Can't yet handle movie fragments when writing`。"""
+    low = (err or "").lower()
+    return "movie fragment" in low or ("fragment" in low and "writing" in low)
+
+
 def write_video_metadata(
     tool_paths: ToolPaths,
     video_path: str,
@@ -39,10 +55,17 @@ def write_video_metadata(
     tags: Optional[List[str]] = None,
     duration: float = 0.0,
     original_name: str = "",
+    allow_remux: bool = True,
+    on_log: Optional[Callable[[str, str], None]] = None,
 ) -> Tuple[bool, str]:
     """把标题/描述/关键词写进视频内部属性（零拷贝）。
 
     同时写入软水印，便于二次运行跳过。
+
+    分片封装兜底：OBS 的「分片 MP4」/录制中断产物是 `moov(mvex)+moof+mdat` 结构，
+    ExifTool 无法写入（Can't yet handle movie fragments when writing）。此时先用
+    ffmpeg `-c copy` 无损重封装成标准 MP4（不改画质、不重编码），再重试写入，
+    并还原文件时间戳，避免录像创建时间被抹掉。
     """
     tags = tags or []
     exif_tags: Dict[str, str] = {}
@@ -61,7 +84,25 @@ def write_video_metadata(
         exif_tags["OriginalFileName"] = original_name
     exif_tags["Software"] = SOFTWARE_MARKER
 
-    return tool_mod.write_metadata(tool_paths, video_path, exif_tags)
+    ok, err = tool_mod.write_metadata(tool_paths, video_path, exif_tags)
+    if ok or not allow_remux:
+        return ok, err
+    # 触发条件：ExifTool 明说分片写不了，或文件本身就是分片封装（错误信息表述可能变化）
+    if not (_is_fragment_error(err) or tool_mod.is_fragmented_mp4(video_path)):
+        return ok, err
+
+    _emit(on_log, "INFO", "检测到分片封装 MP4（ExifTool 无法写入），正在无损重封装 ...")
+    stat_before = preserve_stat(video_path)
+    fixed, fix_err = tool_mod.remux_mp4(tool_paths, video_path)
+    if not fixed:
+        return False, f"{err}（重封装失败：{fix_err}）"
+    restore_timestamps(video_path, stat_before)
+
+    ok2, err2 = tool_mod.write_metadata(tool_paths, video_path, exif_tags)
+    if ok2:
+        _emit(on_log, "INFO", "已重封装为标准 MP4 并写入元数据")
+        return True, ""
+    return False, f"{err}（重封装后仍失败：{err2 or '未知原因'}）"
 
 
 def has_watermark(tool_paths: ToolPaths, video_path: str) -> bool:

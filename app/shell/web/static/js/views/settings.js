@@ -21,6 +21,38 @@ const TIP = {
   cuda: 'CUDA：让程序用显卡加速的东西，没有也能用，只是慢。',
   recursive: '递归：连子文件夹一起处理。',
   dryrun: '预览模式：只演算不落盘，用来确认命名效果。',
+  fmp4: '分片 MP4：OBS 常见格式，ExifTool 写不进去；重封装只换容器不重编码，画质无损。',
+  lan: '局域网访问：服务监听 0.0.0.0，手机/同网设备用 http://<本机IP>:8000/ 打开；改动需重启服务生效。',
+  provider: 'provider：后端类型。openai = OpenAI 兼容接口（llama.cpp / vLLM / NInfer 都算），gemini = 谷歌云端。',
+  base_url: 'base_url：服务地址，形如 http://127.0.0.1:8084/v1；结尾的 /v1 别漏，否则 404。',
+  api_key: 'api_key：密钥。本地服务随便填即可；云端服务是真凭证，不要外传。',
+  timeout: 'timeout：单次请求最长等多少秒。模型越慢越要调大，否则频繁超时。',
+  retry: 'retry_times：失败重试次数。本地 0-1 次够用，网络不稳可 3。',
+  max_tokens: 'max_tokens：AI 单次最多输出多少 token。太小会把 JSON 截断，导致解析失败。',
+  temperature: 'temperature：温度，越低越稳定（0-0.3 适合命名），越高越发散有创意。',
+  top_p: 'top_p：采样范围，越小越集中在高概率词；与 temperature 调一个即可。',
+  json_mode: 'enforce_json_mode：强制只输出 JSON。本地后端必须开，否则会夹带解释文字导致解析失败。',
+  template: '命名模板：{date} → 时间前缀，{title} → AI 标题，{original} → 原文件名。',
+  date_format: '日期格式：strftime 写法，%Y 年 %m 月 %d 日 %H 时 %M 分；%Y%m%d_%H%M → 20261009_2313。',
+  marker: '处理标记：加进文件名的字符串（如 AI_RENAMED），用来识别哪些已处理过。',
+  date_prefix: '时间前缀：文件名开头加录制时间，便于按时间排序。',
+  original_suffix: '原名后缀：把原文件名片段追加到新名后面，保留一点原始线索。',
+  marker_switch: '处理标记开关：在文件名里追加标记，配合「跳过已处理」使用。',
+  skip: '跳过已处理：文件名已含标记或视频内已写入软水印的文件直接跳过，省时间省 token。',
+  move_failed: '失败移入 _failed：处理失败的文件集中放到 _failed 目录，便于复查。',
+  verbose: '详细日志：输出 DEBUG 级日志，排错时开，平时关掉更清爽。',
+  max_side: '帧最长边：截图缩放到这个像素再送 AI。越大越准但更慢更费 token，640 是实测平衡点。',
+  device: 'Whisper 设备：auto 自动选，cuda 用显卡，cpu 纯 CPU（慢但不会因缺库挂起）。',
+  language: '转写语言：auto 自动检测；指定 zh 更快更准，同时决定 .srt 字幕语言。',
+  compute_type: '计算精度：int8_float16 兼顾速度与显存；float16 更准更占显存；显存小选 int8。',
+  whisper_workers: '转写并发：Whisper 建议 1 —— GPU 独占，多路反而互相抢显存。',
+  frames_workers: '抽帧并发：同时跑几个 ffmpeg 抽帧，CPU 核心多可加到 8-16。',
+  ai_workers: 'AI 并发：同时向 AI 后端发几个请求。本地大模型 2-4 合适，云端可更高。',
+  log_file: '日志文件：运行日志落盘位置，排错时看它。',
+  pip_mirror: 'pip 源：装依赖（faster-whisper / CUDA 库）走哪个镜像，国内用清华/阿里更快。',
+  hf_mirror: 'HuggingFace 端点：下载 Whisper 模型走哪个源；必须是 HF 兼容站点（hf-mirror.com 可以，modelscope.cn 不行）。',
+  prompt_sys: '系统提示词：给 AI 定身份与尺度，决定它用什么视角理解视频。',
+  prompt_user: '用户提示词：规定输出格式，必须要求返回含 title / plot / tags 的 JSON。',
 };
 
 /** 开关分组（严格对应 §7.1 开关总表） */
@@ -45,10 +77,10 @@ const SWITCH_GROUPS = [
     id: 'naming',
     label: '命名',
     items: [
-      { id: 'include_date', path: 'naming.include_date', label: '时间前缀', desc: '文件名前缀加 20261008_2313', tip: '' },
-      { id: 'include_original', path: 'naming.include_original', label: '原名后缀', desc: '保留原文件名片段', tip: '' },
-      { id: 'enable_marker', path: 'naming.enable_marker', label: '处理标记', desc: '加 AI_RENAMED 标记，便于识别', tip: '' },
-      { id: 'enable_skip', path: 'naming.enable_skip', label: '跳过已处理', desc: '名字含标记或已写软水印的视频跳过；关闭则全部重跑', tip: '' },
+      { id: 'include_date', path: 'naming.include_date', label: '时间前缀', desc: '文件名前缀加 20261008_2313', tip: TIP.date_prefix },
+      { id: 'include_original', path: 'naming.include_original', label: '原名后缀', desc: '保留原文件名片段', tip: TIP.original_suffix },
+      { id: 'enable_marker', path: 'naming.enable_marker', label: '处理标记', desc: '加 AI_RENAMED 标记，便于识别', tip: TIP.marker_switch },
+      { id: 'enable_skip', path: 'naming.enable_skip', label: '跳过已处理', desc: '名字含标记或已写软水印的视频跳过；关闭则全部重跑', tip: TIP.skip },
     ],
   },
   {
@@ -58,7 +90,27 @@ const SWITCH_GROUPS = [
       { id: 'enable_nfo', path: 'output.nfo', label: '生成 NFO', desc: '供 Jellyfin / Kodi 识别', tip: TIP.nfo },
       { id: 'enable_srt', path: 'output.srt', label: '生成 SRT 字幕', desc: '生成同名 .srt 字幕文件', tip: TIP.srt },
       { id: 'write_metadata', path: 'output.metadata', label: 'ExifTool 写元数据', desc: '把标题写进视频内部属性', tip: TIP.exiftool },
-      { id: 'move_failed', path: 'output.move_failed', label: '失败移入 _failed', desc: '失败文件集中存放，便于复查', tip: '' },
+      { id: 'remux_fragmented', path: 'output.remux_fragmented', label: '分片 MP4 自动重封装', desc: 'OBS 分片录像写不进元数据时，无损重封装后重写', tip: TIP.fmp4 },
+      { id: 'move_failed', path: 'output.move_failed', label: '失败移入 _failed', desc: '失败文件集中存放，便于复查', tip: TIP.move_failed },
+    ],
+  },
+  {
+    id: 'service',
+    label: '服务',
+    items: [
+      {
+        id: 'lan',
+        path: 'runtime.lan',
+        label: '局域网访问',
+        desc: '允许手机 / 同网设备访问（重启服务后生效）',
+        tip: TIP.lan,
+        // 注意：第二参 toast 由 createView 传入，模块作用域里取不到它
+        onChange: (next, toastFn) => toastFn(
+          next ? '已开启：重启服务后手机可用局域网 IP 访问' : '已关闭：重启服务后仅本机可访问',
+          'info',
+          3600,
+        ),
+      },
     ],
   },
   {
@@ -81,46 +133,47 @@ const SWITCH_GROUPS = [
         set: (cfg, v) => setPath(cfg, 'frames.hwaccel', v ? 'cuda' : 'none'),
       },
       { id: 'auto_install_cuda', path: 'runtime.auto_install_cuda', label: '自动补 CUDA 库', desc: '缺库时只补装缺失的包到 libs/', tip: TIP.cuda },
-      { id: 'verbose', path: 'runtime.verbose', label: '详细日志', desc: '输出 DEBUG 级详细日志', tip: '' },
+      { id: 'verbose', path: 'runtime.verbose', label: '详细日志', desc: '输出 DEBUG 级详细日志', tip: TIP.verbose },
     ],
   },
 ];
 
 /** AI 配置字段（严格对齐 §7.2 ai 结构） */
 const AI_FIELDS = [
-  { path: 'ai.provider', label: 'provider 后端', type: 'select', options: ['openai', 'gemini'], hint: 'openai 兼容 或 gemini' },
-  { path: 'ai.base_url', label: 'base_url 服务地址', type: 'text', hint: '如 http://127.0.0.1:8094/v1' },
-  { path: 'ai.api_key', label: 'api_key 密钥', type: 'password', hint: '本地服务可随意填写' },
+  { path: 'ai.provider', label: 'provider 后端', type: 'select', options: ['openai', 'gemini'], hint: 'openai 兼容 或 gemini', tip: TIP.provider },
+  { path: 'ai.base_url', label: 'base_url 服务地址', type: 'text', hint: '如 http://127.0.0.1:8084/v1', tip: TIP.base_url },
+  { path: 'ai.api_key', label: 'api_key 密钥', type: 'password', hint: '本地服务可随意填写', tip: TIP.api_key },
   { path: 'ai.model', label: 'model 模型名', type: 'text', hint: '必须支持看图（多模态）', tip: TIP.multimodal },
-  { path: 'ai.timeout', label: 'timeout 超时(秒)', type: 'number', step: '1', min: '1' },
-  { path: 'ai.retry_times', label: 'retry_times 重试次数', type: 'number', step: '1', min: '0' },
-  { path: 'ai.max_tokens', label: 'max_tokens 最大输出', type: 'number', step: '1', min: '1' },
-  { path: 'ai.temperature', label: 'temperature 温度', type: 'number', step: '0.1', min: '0', max: '2' },
-  { path: 'ai.top_p', label: 'top_p 采样', type: 'number', step: '0.1', min: '0', max: '1' },
-  { path: 'ai.enforce_json_mode', label: 'enforce_json_mode 强制 JSON', type: 'bool', hint: '要求模型只返回 JSON' },
+  { path: 'ai.timeout', label: 'timeout 超时(秒)', type: 'number', step: '1', min: '1', hint: '单次请求等待上限', tip: TIP.timeout },
+  { path: 'ai.retry_times', label: 'retry_times 重试次数', type: 'number', step: '1', min: '0', hint: '失败后重试几次', tip: TIP.retry },
+  { path: 'ai.max_tokens', label: 'max_tokens 最大输出', type: 'number', step: '1', min: '1', hint: '太小会截断 JSON', tip: TIP.max_tokens },
+  { path: 'ai.temperature', label: 'temperature 温度', type: 'number', step: '0.1', min: '0', max: '2', hint: '越低越稳定', tip: TIP.temperature },
+  { path: 'ai.top_p', label: 'top_p 采样', type: 'number', step: '0.1', min: '0', max: '1', hint: '越小越集中', tip: TIP.top_p },
+  { path: 'ai.enforce_json_mode', label: 'enforce_json_mode 强制 JSON', type: 'bool', hint: '要求模型只返回 JSON', tip: TIP.json_mode },
 ];
 
 /** 高级参数（frames / whisper / naming / runtime） */
 const ADVANCED_FIELDS = [
-  { path: 'naming.template', label: '命名模板 naming.template', type: 'text', hint: '如 {date}_{title}' },
-  { path: 'naming.date_format', label: '日期格式 naming.date_format', type: 'text', hint: '如 %Y%m%d_%H%M' },
-  { path: 'naming.marker', label: '处理标记 naming.marker', type: 'text', hint: '如 AI' },
-  { path: 'frames.max_keyframes', label: '关键帧上限 frames.max_keyframes', type: 'number', step: '1', min: '1', tip: TIP.keyframe },
-  { path: 'frames.max_side', label: '帧最长边 frames.max_side', type: 'number', step: '1', min: '64' },
-  { path: 'frames.workers', label: '抽帧并发 frames.workers', type: 'number', step: '1', min: '1', tip: TIP.ffmpeg },
-  { path: 'whisper.model', label: 'Whisper 模型', type: 'text', tip: TIP.whisper },
-  { path: 'whisper.device', label: 'Whisper 设备 whisper.device', type: 'select', options: ['auto', 'cuda', 'cpu'] },
+  { path: 'naming.template', label: '命名模板 naming.template', type: 'text', hint: '如 {date}_{title}', tip: TIP.template },
+  { path: 'naming.date_format', label: '日期格式 naming.date_format', type: 'text', hint: '如 %Y%m%d_%H%M', tip: TIP.date_format },
+  { path: 'naming.marker', label: '处理标记 naming.marker', type: 'text', hint: '如 AI_RENAMED', tip: TIP.marker },
+  { path: 'frames.max_keyframes', label: '关键帧上限 frames.max_keyframes', type: 'number', step: '1', min: '1', hint: '挑几张图给 AI 看', tip: TIP.keyframe },
+  { path: 'frames.max_side', label: '帧最长边 frames.max_side', type: 'number', step: '1', min: '64', hint: '截图缩放后的最长边像素', tip: TIP.max_side },
+  { path: 'frames.workers', label: '抽帧并发 frames.workers', type: 'number', step: '1', min: '1', hint: '同时跑几个 ffmpeg', tip: TIP.frames_workers },
+  { path: 'whisper.model', label: 'Whisper 模型', type: 'text', hint: '如 large-v3-turbo', tip: TIP.whisper },
+  { path: 'whisper.device', label: 'Whisper 设备 whisper.device', type: 'select', options: ['auto', 'cuda', 'cpu'], hint: 'auto = 自动检测', tip: TIP.device },
   {
     path: 'whisper.language',
     label: '转写 / 字幕语言',
     type: 'select',
     options: ['auto', 'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'pt', 'it', 'ar'],
     hint: 'auto = 自动检测；同时决定 .srt 字幕的语言',
+    tip: TIP.language,
   },
-  { path: 'whisper.compute_type', label: '计算精度 whisper.compute_type', type: 'text', hint: '如 int8_float16 / float16' },
-  { path: 'whisper.workers', label: '转写并发 whisper.workers', type: 'number', step: '1', min: '1' },
-  { path: 'runtime.ai_workers', label: 'AI 并发 runtime.ai_workers', type: 'number', step: '1', min: '1' },
-  { path: 'runtime.log_file', label: '日志文件 runtime.log_file', type: 'text', hint: '如 logs/run.log' },
+  { path: 'whisper.compute_type', label: '计算精度 whisper.compute_type', type: 'text', hint: '如 int8_float16 / float16', tip: TIP.compute_type },
+  { path: 'whisper.workers', label: '转写并发 whisper.workers', type: 'number', step: '1', min: '1', hint: 'GPU 场景建议 1', tip: TIP.whisper_workers },
+  { path: 'runtime.ai_workers', label: 'AI 并发 runtime.ai_workers', type: 'number', step: '1', min: '1', hint: '同时问 AI 几路', tip: TIP.ai_workers },
+  { path: 'runtime.log_file', label: '日志文件 runtime.log_file', type: 'text', hint: '如 logs/run.log', tip: TIP.log_file },
 ];
 
 /** 术语速查（页面级「这是什么」） */
@@ -137,6 +190,19 @@ const GLOSSARY = [
   ['CUDA', TIP.cuda],
   ['递归', TIP.recursive],
   ['预览模式', TIP.dryrun],
+  ['分片 MP4', TIP.fmp4],
+  ['局域网访问', TIP.lan],
+  ['base_url', TIP.base_url],
+  ['max_tokens', TIP.max_tokens],
+  ['temperature', TIP.temperature],
+  ['top_p', TIP.top_p],
+  ['enforce_json_mode', TIP.json_mode],
+  ['命名模板', TIP.template],
+  ['日期格式', TIP.date_format],
+  ['处理标记', TIP.marker],
+  ['跳过已处理', TIP.skip],
+  ['计算精度', TIP.compute_type],
+  ['并发', TIP.ai_workers],
 ];
 
 export function createView(ctx) {
@@ -184,13 +250,17 @@ export function createView(ctx) {
       const cfg = store.state.config;
       const next = !getVal(item, cfg);
       commit(setVal(item, cfg, next));
+      if (typeof item.onChange === 'function') item.onChange(next, toast);
     });
     switchRefs[item.id] = sw;
 
     const labelRow = h('div', { class: 'switch-label' }, [item.label]);
-    if (item.tip) {
-      labelRow.appendChild(h('span', { class: 'tip', tabindex: '0', 'data-tip': item.tip, text: '?' }));
-    }
+    labelRow.appendChild(h('span', {
+      class: 'tip',
+      tabindex: '0',
+      'data-tip': item.tip || item.desc || item.label,
+      text: '?',
+    }));
 
     return h('div', { class: 'switch-row' }, [
       h('div', { class: 'switch-meta' }, [labelRow, h('div', { class: 'switch-desc', text: item.desc })]),
@@ -226,7 +296,12 @@ export function createView(ctx) {
         'aria-label': field.label,
       }, [h('span', { class: 'switch-knob' })]);
       const labelRow = h('div', { class: 'switch-label' }, [field.label]);
-      if (field.tip) labelRow.appendChild(h('span', { class: 'tip', tabindex: '0', 'data-tip': field.tip, text: '?' }));
+      labelRow.appendChild(h('span', {
+        class: 'tip',
+        tabindex: '0',
+        'data-tip': field.tip || field.hint || field.label,
+        text: '?',
+      }));
       const desc = field.hint || '';
       sw.addEventListener('click', () => {
         const cfg = store.state.config;
@@ -266,7 +341,12 @@ export function createView(ctx) {
     input.addEventListener('change', onChange);
 
     const labelRow = h('div', { class: 'field-label' }, [field.label]);
-    if (field.tip) labelRow.appendChild(h('span', { class: 'tip', tabindex: '0', 'data-tip': field.tip, text: '?' }));
+    labelRow.appendChild(h('span', {
+      class: 'tip',
+      tabindex: '0',
+      'data-tip': field.tip || field.hint || field.label,
+      text: '?',
+    }));
 
     fieldRefs.push({ field, input, kind: 'input' });
     return h('div', { class: 'field' }, [
@@ -473,6 +553,53 @@ export function createView(ctx) {
     ]);
   }
 
+  // ---------- 访问方式（本机 / 局域网） ----------
+  function buildAccessPanel() {
+    const out = h('div', { class: 'env-status' });
+
+    async function load() {
+      out.textContent = '读取中…';
+      try {
+        const s = await apiClient.serverInfo();
+        out.textContent = '';
+        const grid = h('div', { class: 'kv-grid' });
+        grid.appendChild(kv('监听地址', `${s.host}:${s.port}`));
+        grid.appendChild(kv('当前模式', s.lan ? '局域网可访问' : '仅本机'));
+        grid.appendChild(kv('配置开关', s.config_lan ? '开启' : '关闭'));
+        out.appendChild(grid);
+
+        out.appendChild(h('div', { class: 'env-log', text: `本机：${s.local_url}` }));
+        for (const url of s.lan_urls || []) {
+          const row = h('div', { class: 'env-log' }, ['局域网：']);
+          row.appendChild(h('a', { href: url, target: '_blank', rel: 'noreferrer', text: url }));
+          out.appendChild(row);
+        }
+        if (s.restart_required) {
+          out.appendChild(h('div', {
+            class: 'env-warn',
+            text: '⚠️ 配置开关与当前监听不一致：重启服务后才会生效。',
+          }));
+        }
+      } catch (err) {
+        out.textContent = '无法获取服务信息（后端未连接？）';
+      }
+    }
+
+    const refreshBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '刷新' });
+    refreshBtn.addEventListener('click', () => load());
+    refs.accessReload = load;
+
+    return h('div', { class: 'panel' }, [
+      h('div', { class: 'panel-head' }, [
+        h('span', { class: 'panel-title', text: '访问方式' }),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'panel-hint', text: '开关改动需重启服务' }),
+        refreshBtn,
+      ]),
+      out,
+    ]);
+  }
+
   // ---------- 下载镜像（国内加速） ----------
   const MIRROR_PRESETS = {
     pip: {
@@ -485,11 +612,10 @@ export function createView(ctx) {
     hf: {
       official: 'https://huggingface.co',
       'hf-mirror': 'https://hf-mirror.com',
-      modelscope: 'https://www.modelscope.cn',
     },
   };
 
-  function buildMirrorRow(label, cfgPath, presets, hint) {
+  function buildMirrorRow(label, cfgPath, presets, hint, tip) {
     const input = h('input', {
       class: 'field-input',
       type: 'text',
@@ -526,7 +652,9 @@ export function createView(ctx) {
     chips.appendChild(reset);
 
     return h('div', { class: 'field' }, [
-      h('div', { class: 'field-label', text: label }),
+      h('div', { class: 'field-label' }, [label, h('span', {
+        class: 'tip', tabindex: '0', 'data-tip': tip || hint, text: '?',
+      })]),
       input,
       h('div', { class: 'field-hint', text: hint }),
       chips,
@@ -538,11 +666,21 @@ export function createView(ctx) {
     grid.appendChild(buildMirrorRow(
       'pip 源 runtime.pip_index', 'runtime.pip_index', MIRROR_PRESETS.pip,
       '依赖下载（pip install）使用的镜像源，可自定义填任意地址',
+      TIP.pip_mirror,
     ));
     grid.appendChild(buildMirrorRow(
       'HuggingFace 端点 runtime.hf_endpoint', 'runtime.hf_endpoint', MIRROR_PRESETS.hf,
       '模型下载使用的端点（如 hf-mirror.com），可自定义',
+      TIP.hf_mirror,
     ));
+    // modelscope 不是 HF 兼容端点（只有网页接口），填进去会让模型加载报 JSON 解析错
+    const hfVal = String(getPath(store.state.config, 'runtime.hf_endpoint', '') || '');
+    if (/modelscope\.(cn|com)/i.test(hfVal)) {
+      grid.appendChild(h('div', {
+        class: 'field-hint warn-text',
+        text: '⚠️ modelscope.cn 不是 HuggingFace 兼容端点，会导致 Whisper 模型加载失败（JSON 解析错误）。请改用 hf-mirror.com 或留空。',
+      }));
+    }
     return h('div', { class: 'panel' }, [
       h('div', { class: 'panel-head' }, [
         h('span', { class: 'panel-title', text: '下载镜像（国内加速）' }),
@@ -554,7 +692,7 @@ export function createView(ctx) {
   }
 
   // ---------- 提示词（可自定义） ----------
-  function buildPromptArea(label, cfgPath, hint) {
+  function buildPromptArea(label, cfgPath, hint, tip) {
     const ta = h('textarea', { class: 'field-input prompt-area', rows: '7' });
     ta.value = getPath(store.state.config, cfgPath, '') || '';
 
@@ -581,7 +719,9 @@ export function createView(ctx) {
     fieldRefs.push({ field: { path: cfgPath }, input: ta, kind: 'input' });
 
     return h('div', { class: 'field field-wide' }, [
-      h('div', { class: 'field-label' }, [label, h('span', { class: 'spacer' }), reset]),
+      h('div', { class: 'field-label' }, [label, h('span', {
+        class: 'tip', tabindex: '0', 'data-tip': tip || hint, text: '?',
+      }), h('span', { class: 'spacer' }), reset]),
       ta,
       h('div', { class: 'field-hint' }, [hint, ' · ', counter]),
     ]);
@@ -592,10 +732,12 @@ export function createView(ctx) {
     wrap.appendChild(buildPromptArea(
       '系统提示词 ai.system_prompt', 'ai.system_prompt',
       '角色与总要求：决定 AI 以什么身份、什么尺度理解视频',
+      TIP.prompt_sys,
     ));
     wrap.appendChild(buildPromptArea(
       '用户提示词 ai.prompt', 'ai.prompt',
       '输出格式要求：必须要求模型返回 JSON（含 title / plot / tags）',
+      TIP.prompt_user,
     ));
 
     return h('div', { class: 'panel' }, [
@@ -686,6 +828,7 @@ export function createView(ctx) {
     const view = h('div', { class: 'view view-settings' }, [
       buildHeader(),
       buildSwitchGroups(),
+      buildAccessPanel(),
       buildFormPanel('AI 配置', '严格对齐 config.json 的 ai 结构', AI_FIELDS),
       buildPromptPanel(),
       buildAITestPanel(),
@@ -697,6 +840,7 @@ export function createView(ctx) {
     container.appendChild(view);
     unsubs.push(store.subscribe(render));
     refreshEnv(true);
+    if (refs.accessReload) refs.accessReload();
   }
 
   function destroy() {
@@ -708,6 +852,7 @@ export function createView(ctx) {
     refs.saveHint = null;
     refs.aiTestOut = null;
     refs.envOut = null;
+    refs.accessReload = null;
   }
 
   return { mount, render, destroy };

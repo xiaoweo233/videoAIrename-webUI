@@ -586,9 +586,13 @@ class RenameEngine:
                     self.tools, new_path,
                     title=result.title, plot=result.plot, tags=result.tags,
                     duration=info.duration, original_name=name,
+                    allow_remux=bool(output_cfg.get("remux_fragmented", True)),
+                    on_log=lambda lv, msg: self._log(lv, msg, file=name),
                 )
                 if not ok and err:
                     self._log("WARN", f"元数据写入失败：{err}", file=name)
+                # ExifTool 覆写会刷新 mtime（含重封装），写回改名前的原始时间戳
+                meta_mod.restore_timestamps(new_path, stat_before)
             if output_cfg.get("nfo", True):
                 meta_mod.write_nfo(
                     new_path, title=result.title, plot=result.plot,
