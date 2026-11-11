@@ -20,7 +20,7 @@
     "hwaccel": "none"
   },
   "whisper": {
-    "enable": false,
+    "enable": true,
     "backend": "auto",
     "prefer_api": true,
     "allow_download": false,
