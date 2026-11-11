@@ -112,6 +112,9 @@ export const DEFAULT_CONFIG = Object.freeze({
   frames: { max_keyframes: 10, max_side: 640, workers: 8, hwaccel: 'none' },
   whisper: {
     enable: false,
+    backend: 'auto',
+    prefer_api: true,
+    allow_download: false,
     model: 'large-v3-turbo',
     device: 'auto',
     compute_type: 'int8_float16',
@@ -119,6 +122,18 @@ export const DEFAULT_CONFIG = Object.freeze({
     vad_filter: true,
     language: 'zh',
     use_gpu: true,
+    api: {
+      protocol: 'gradio',
+      base_url: 'http://127.0.0.1:7867',
+      api_key: '',
+      model: 'whisper-1',
+      timeout: 600,
+      prompt: '',
+      diarize: false,
+      max_chars: 20,
+      punc: true,
+      hotwords: '',
+    },
   },
   naming: {
     template: '{date}_{title}',
@@ -145,7 +160,8 @@ export const DEFAULT_CONFIG = Object.freeze({
     auto_install_cuda: true,
     // 国内镜像（留空 = 官方源）
     pip_index: 'https://pypi.org/simple',
-    hf_endpoint: 'https://www.modelscope.cn',
+    // modelscope.cn 不是 HuggingFace 兼容端点，填进去会让模型下载报 JSON 解析错
+    hf_endpoint: 'https://hf-mirror.com',
     // 局域网访问：true = 监听 0.0.0.0（手机/同网设备可访问），重启服务后生效
     lan: true,
   },

@@ -21,13 +21,28 @@
   },
   "whisper": {
     "enable": false,
+    "backend": "auto",
+    "prefer_api": true,
+    "allow_download": false,
     "model": "large-v3-turbo",
     "device": "auto",
     "compute_type": "int8_float16",
     "workers": 4,
     "vad_filter": true,
     "language": "zh",
-    "use_gpu": true
+    "use_gpu": true,
+    "api": {
+      "protocol": "gradio",
+      "base_url": "http://127.0.0.1:7867",
+      "api_key": "",
+      "model": "whisper-1",
+      "timeout": 600,
+      "prompt": "",
+      "diarize": false,
+      "max_chars": 20,
+      "punc": true,
+      "hotwords": ""
+    }
   },
   "naming": {
     "template": "{date}_{title}",
@@ -52,7 +67,7 @@
     "verbose": false,
     "auto_install_cuda": true,
     "pip_index": "https://pypi.org/simple",
-    "hf_endpoint": "https://www.modelscope.cn",
+    "hf_endpoint": "https://hf-mirror.com",
     "lan": true
   },
   "input": {

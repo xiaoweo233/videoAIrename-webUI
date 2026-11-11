@@ -136,7 +136,8 @@ python run.py --selfcheck     # 只做环境自检后退出
 |------|----------|------|
 | `ai` | `provider` `base_url` `api_key` `model` `timeout` `temperature` `enforce_json_mode` `system_prompt` `prompt` | AI 后端与提示词；`enforce_json_mode` 对本地后端基本必开 |
 | `frames` | `max_keyframes` `max_side` `workers` `hwaccel` | 抽几张图、缩放到多大、并发几路 |
-| `whisper` | `enable` `model` `device` `compute_type` `language` `use_gpu` `workers` | 转写开关与设备；`workers` 在 GPU 场景建议 1 |
+| `whisper` | `enable` `backend` `prefer_api` `allow_download` `model` `device` `compute_type` `language` `use_gpu` `workers` | 转写开关与设备；`backend=auto/local/api` 决定优先 API 还是本地；`prefer_api` 控制 auto 下是否先试 API；`allow_download` 控制本地模型缺失时是否自动联网下载（默认关，避免弱网卡住整批任务）；`workers` 在 GPU 场景建议 1 |
+| `whisper.api` | `protocol` `base_url` `api_key` `model` `timeout` `prompt` `diarize` `max_chars` `punc` `hotwords` | 远程转写服务；`backend=auto/api` 时生效；`protocol` 见下节 |
 | `naming` | `template` `date_format` `marker` `enable_marker` `enable_skip` | 命名模板、时间格式、处理标记、跳过已处理 |
 | `output` | `nfo` `metadata` `srt` `move_failed` `dry_run` `remux_fragmented` | 落盘项；`dry_run` = 预览模式，`remux_fragmented` = 分片 MP4 自动重封装 |
 | `runtime` | `ai_workers` `log_file` `verbose` `auto_install_cuda` `pip_index` `hf_endpoint` `lan` | 并发、日志、镜像源、局域网开关 |
@@ -197,6 +198,56 @@ python run.py [选项]
 并发配额：抽帧 `min(cpu, 8)` · 转写 `1`（GPU 独占，多路反而抢显存）· AI `1~4` · 落盘串行。
 ②a 与 ②b **互不阻塞**，无声视频跳过转写直接放行 —— 这是吞吐量的主要来源。
 
+### ②b 转写：优先 API，失败自动回退本地
+
+`whisper.backend` 决定这一阶段怎么出字幕：
+
+| backend | 说明 | 适用 |
+|---------|------|------|
+| `auto`（推荐） | 先试 HTTP 转写服务，不可用自动回退本地 faster-whisper | 既有本机 ASR 服务又想有兵底 |
+| `local` | 只用本机 faster-whisper 推理 | 有显卡、想完全离线 |
+| `api` | 只把音频发给 HTTP 转写服务，失败就跳过（不回退） | 没有显卡 / 想强制走远程 |
+
+`auto` 下的行为细节：
+
+- `whisper.prefer_api`（默认开）控制是否真的先试 API；关闭后等价于 `local`
+- 加载阶段就探连通性（`probe_asr_backend`，8 秒超时）：远程服务没起来会**立刻**回退本地，
+  而不是等第一个视频转写失败才发现
+- 回退粒度是「本批」而不是「本文件」：远程连续失败 `2` 个文件（`_REMOTE_FAIL_CAP`）后，
+  本次任务剩余文件全部直走本地，不再每个文件都白等一次连接超时
+- 每个新任务开始（`Engine.run` → `WhisperEngine.reset_task_state`）会清掉上一批的失败终态，
+  重新试探远程 —— 远程服务在上一批之后才启动/重启，这一批就能正常用上
+- 单个文件远程失败时会立即用本地重试一次；本地也失败才把两者错误拼起来报出
+- 模型还没下完（缺词表）也能跑：只要 API 可用，`auto` 后端不会因为本地模型不完整而罢工
+
+`api` 下再选 `whisper.api.protocol` 两种协议，二者产出的都是标准 `TranscriptSegment` 列表，
+对下游（AI 分析、SRT 落盘）完全等价：
+
+**1. `openai`** — OpenAI 兼容 `POST {base_url}/audio/transcriptions`（multipart）
+
+- 适用：whisper.cpp server、LM Studio、vLLM-whisper、OpenAI 官方、各类中转站
+- `base_url` 要填到 `/v1` 结尾；请求带 `response_format=verbose_json`，
+  服务端返回 `segments` 就用其时间轴，只返回 `text` 时退化为「整段一条字幕」
+
+**2. `gradio`** — Qwen3-ASR Pro 等 Gradio 服务的 `/single_handler`
+
+- 适用：本机 `127.0.0.1:7867` 那套 Qwen3-ASR（含角色识别 / 热词 / 标点断句 / 逐字时间戳）
+- 需要 `gradio_client`；服务端返回一个 zip，里面有 `single_全员.srt`（往往逐词一行）、
+  按角色分的 `.srt` 和 `时间.json`（词级时间 + speaker）。**服务端那个 SRT 未必能直接用，
+  `max_chars` 也不对它生效**，所以本工具先看它像不像正常字幕行：像（中文场景，服务端
+  已按标点断句）就直接用，只把行首 `[角色 SPEAKER_xx]` 归一成 `[SPEAKER_xx]`；不像
+  （英文场景逐词一行）才拿它的词配 `时间.json` 的 speaker，自己按 `max_chars` / 句末标点 /
+  说话人切换 / >0.8s 停顿聚合成行（`group_words_into_segments`，`app/core/asr_remote.py`）
+- 独有选项：`diarize`（角色识别，字幕行首带 `[SPEAKER_xx]`，行内字数按正文算）、
+  `hotwords`（热词注入）、`max_chars`（单行字数，Gradio 协议下由本工具聚合时使用）、
+  `punc`（标点断句）
+
+> 兼容性说明：Gradio 6.x 的 `api_name` 不带前导斜杠（`single_handler`），
+> 5.x 及更早则带（`/single_handler`），本工具两种都认。
+> 探测接口见 `POST /api/whisper/test`：默认只探协议层（秒回，不传音频）；
+> 传 `{"deep": true}` 会现场用 ffmpeg 合成一段 ~7 秒的测试语音**真跑一次转写**，
+> 只有拿回非空文本才算通过 —— 能区分「服务在跑」和「模型真能出字」。
+
 ### 架构：一核两壳
 
 ```
@@ -241,8 +292,10 @@ app/
 | `POST` | `/api/dialog/files`、`/api/dialog/folder` | 服务端调起系统原生对话框，返回绝对路径 |
 | `POST` `GET` | `/api/dialog/cancel`、`/api/dialog/status` | 取消 / 查询对话框 |
 | `POST` | `/api/ai/test` | 测试 AI 后端可达性并识别模型 |
-| `GET` | `/api/whisper/status` | faster-whisper / CUDA 设备 / 运行库状态 |
-| `POST` | `/api/whisper/install`、`/api/whisper/setup` | 装依赖 / 补 CUDA 库 |
+| `GET` | `/api/whisper/status` | faster-whisper / CUDA 设备 / 运行库 / 后端 / 模型就绪状态 |
+| `POST` | `/api/whisper/install`、`/api/whisper/setup` | 装依赖 / 补 CUDA 库（系统已装过会直接复用） |
+| `POST` | `/api/whisper/model` | 下载 / 续传 Whisper 模型（断点续传，弱网可反复重试） |
+| `POST` | `/api/whisper/test` | 测试自定义转写 API（`deep=true` 时真跑一次转写） |
 | `GET` | `/api/mirrors` | 下载镜像预设与当前值 |
 | `GET` | `/api/server` | 当前监听地址、本机与局域网访问 URL |
 | `GET` | `/api/health`、`/api/runtime` | 健康检查 / 运行期依赖报告 |
@@ -297,11 +350,24 @@ videoAIrenameAPP/
 |------|------|
 | AI 报「上下文溢出」 | 降低 `frames.max_keyframes`（如 10 → 6）或 `frames.max_side`（640 → 480） |
 | 处理很慢 | 提高 `frames.workers` 与 `runtime.ai_workers`；确认 Whisper 走的是 GPU |
-| 转写挂起不动 | 缺 `cublas64_12.dll`；设置页点「下载 / 修复 CUDA 库」，或把 `whisper.device` 设为 `cpu` |
+| 转写挂起不动 | 缺 `cublas64_12.dll`；设置页点「下载 / 修复 CUDA 库」（系统 Python 里已装过 `nvidia-cublas-cu12` 会直接复用，不再重复下载），或把 `whisper.device` 设为 `cpu` |
+| 模型下载卡住 / 反复失败 | 已内置断点续传：中断后再点「下载 / 续传模型」会从已下载的字节继续，不会从零开始 |
+| 转写报「本地模型未就绪」 | 本地模型没下完（缺词表）。两种解法：①保持 `whisper.backend=auto`，走 API 转写，本地模型不参与；②点「下载 / 续传模型」补全（续传从 `model.bin` 与 `model.bin.incomplete` 里较大的那份接着下）。`whisper.allow_download` 默认关闭，所以任务不会自己去拉 1.6GB |
 | 手机访问不了 | 打开设置页「局域网访问」并**重启服务**，确认同一 Wi-Fi 且防火墙放行端口 |
 
 ### 已知行为
 
+- **元数据写在哪**（这决定了 Windows 属性面板能不能看到）：ExifTool 会分两遍写 ——
+  ① UTF-8 写 `ItemList` / `XMP`，给播放器、Jellyfin、Kodi 读；
+  ② GBK 写 QuickTime `Keys` 盒，Windows 资源管理器「属性 → 详细信息」读的是这一份。
+  为什么第 ② 步必须用 GBK：Windows 按**系统 ANSI 代码页**（中文 = GBK）解码 Keys 盒，
+  若存 UTF-8，面板会显示「榛勮壊鑺辫-榛戜笣缇庡コ」这类乱码，看起来就像「没生效」。
+  另外 `Keys` 盒一旦存在，Windows 就**只认它**、完全忽略 `ItemList` ——
+  所以只写 ItemList 的文件在属性面板里永远是空的。
+- **Windows 属性面板能看到**：标题、说明/备注、程序名称（软水印 `AIVideoRenameV1`）。
+- **看不到的**：**「标记 / 关键词」**。这不是本工具的 bug —— Windows 的 MP4 属性处理器
+  不读第三方写入的关键词（`Keys:Keywords`、`XMP-dc:Subject`、`XMP-pdf:Keywords`
+  实测全部读不到）。关键词仍写进了 `XMP`，Jellyfin / Kodi / 其它读 XMP 的工具正常可见。
 - **分片 MP4**（OBS 的 fragmented MP4、录制中断产物）ExifTool 写不进去，工具会用
   ffmpeg `-c copy` **无损重封装**成标准 MP4 后再写（只换容器，不重编码，画质无损）。
 - **跳过已处理**默认开启：文件名含标记或已写软水印的文件跳过；关闭则全部重跑，
@@ -316,6 +382,11 @@ A：都能用。拖拽依赖浏览器给的 `text/uri-list`（`file:///D:/...`�
 
 **Q：不装 faster-whisper 能用吗？**
 A：能。会自动降级为**纯画面分析**，只是没有字幕和 `.srt`。设置页可一键安装。
+
+**Q：没有显卡 / 不想下 1.6GB 模型，能出字幕吗？**
+A：能。设置 → 转写后端选「自动（优先 API）」或「仅自定义 HTTP API」，填一个 OpenAI 兼容的语音服务地址
+（或本机的 Qwen3-ASR Gradio 服务），音频会发过去转写，本机不占显卡、不下载模型。
+两种协议的区别见[②b 转写](#b-转写本地模型-或-自定义-api)。
 
 **Q：AI 用的是云端还是本地？**
 A：你说了算。`ai.provider=openai` + 本地 `base_url` 就是本地模型；填云端地址就是云端。

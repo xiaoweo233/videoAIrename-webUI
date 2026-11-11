@@ -49,6 +49,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "whisper": {
         "enable": False,
+        # backend：auto = 优先 API、失败自动回退本地；local = 仅本地；api = 仅远程（不回退）
+        "backend": "auto",
+        # 优先使用 API 接口 ASR（backend=auto 时生效：先探/用远程，不可用则回退本地）
+        "prefer_api": True,
+        # 本地模型缺失/不完整时是否允许运行时联网下载。
+        # 默认关：弱网下 faster-whisper 会去拉 1.6GB 并卡住整条流水线；
+        # 需要下载请到「设置 → 转写运行环境 → 下载 / 续传模型」（可停可续）。
+        "allow_download": False,
         "model": "large-v3-turbo",
         "device": "auto",
         "compute_type": "int8_float16",
@@ -56,6 +64,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "vad_filter": True,
         "language": "zh",
         "use_gpu": True,
+        # 自定义转写 API（backend=auto/api 时生效）
+        "api": {
+            # protocol：openai = OpenAI 兼容 /v1/audio/transcriptions
+            #           gradio = Qwen3-ASR Pro 等 Gradio 服务 /single_handler
+            "protocol": "gradio",
+            # 本机 Qwen3-ASR Pro 的默认端口；连不上会自动回退本地 Whisper
+            "base_url": "http://127.0.0.1:7867",
+            "api_key": "",
+            "model": "whisper-1",
+            "timeout": 600,
+            "prompt": "",
+            # Gradio（Qwen3-ASR）专用
+            "diarize": False,
+            "max_chars": 20,
+            "punc": True,
+            "hotwords": "",
+        },
     },
     "naming": {
         "template": "{date}_{title}",
@@ -83,7 +108,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "auto_install_cuda": True,
         # 国内镜像（留空 = 官方源）：pip 依赖下载 / HuggingFace 模型下载
         "pip_index": "https://pypi.org/simple",
-        "hf_endpoint": "https://www.modelscope.cn",
+        # 注意：www.modelscope.cn 不是 HuggingFace 兼容端点（只有网页接口），
+        # 填进去会让模型下载报 JSONDecodeError。默认用国内可用的镜像。
+        "hf_endpoint": "https://hf-mirror.com",
         # 局域网访问：true = 监听 0.0.0.0（手机/同网设备可访问），重启服务后生效
         "lan": True,
     },

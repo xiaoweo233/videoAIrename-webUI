@@ -62,6 +62,20 @@ def write_video_metadata(
 
     同时写入软水印，便于二次运行跳过。
 
+    ★ 为什么必须写 QuickTime「Keys」盒（重要，实测结论）：
+      Windows 资源管理器/文件属性的「标题/说明/标记」读的是 MP4 的 Apple
+      Keys 盒（moov/udta/meta/keys + ilst 里 key 为 mdta 名称的项）。
+      ffmpeg 生成的 MP4 只带 ItemList 盒（ilst 里是 ©nam / desc），
+      而 **只要文件里存在 keys 盒，Windows 就只认 keys、完全忽略 ItemList**。
+      典型现象：ExifTool 显示 Title/Description 明明写进去了，Windows 属性
+      面板却全是空的 —— 因为 keys 盒存在但里面没有 title 项。
+      实测（同一文件，四种写法）：
+        只写 ItemList        → Windows 读不到
+        写 Keys:Title        → Windows 读得到
+        ItemList + Keys 双写 → Windows 读得到
+      因此这里三种命名空间一起写（ItemList 给播放器、Keys 给 Windows、
+      XMP 给 Jellyfin/Kodi），确保各端都能读到。
+
     分片封装兜底：OBS 的「分片 MP4」/录制中断产物是 `moov(mvex)+moof+mdat` 结构，
     ExifTool 无法写入（Can't yet handle movie fragments when writing）。此时先用
     ffmpeg `-c copy` 无损重封装成标准 MP4（不改画质、不重编码），再重试写入，
@@ -71,18 +85,27 @@ def write_video_metadata(
     exif_tags: Dict[str, str] = {}
 
     if title:
-        exif_tags["Title"] = title
+        # ItemList（ffmpeg/mp4 通用）+ Keys（Windows 属性面板）+ XMP（媒体库）
+        exif_tags["ItemList:Title"] = title
+        exif_tags["Keys:Title"] = title
         exif_tags["XMP-dc:Title"] = title
     if plot:
-        exif_tags["Description"] = plot
-        exif_tags["Comment"] = plot
+        exif_tags["ItemList:Description"] = plot
+        exif_tags["ItemList:Comment"] = plot
+        exif_tags["Keys:Description"] = plot
+        exif_tags["Keys:Comment"] = plot
         exif_tags["XMP-dc:Description"] = plot
     if tags:
-        # ExifTool 的 Keywords 支持多条，用逗号合并更稳
-        exif_tags["Keywords"] = ", ".join(str(t) for t in tags if t)
+        joined = ", ".join(str(t) for t in tags if t)
+        # Windows 的「标记」读 Keys:Keywords；XMP-dc:Subject 给 Jellyfin/Kodi
+        exif_tags["Keys:Keywords"] = joined
+        exif_tags["XMP-dc:Subject"] = joined
     if original_name:
-        exif_tags["OriginalFileName"] = original_name
-    exif_tags["Software"] = SOFTWARE_MARKER
+        exif_tags["Keys:OriginalFileName"] = original_name
+        exif_tags["XMP-getty:OriginalFileName"] = original_name
+    # 软水印：Keys 让 Windows「程序名称」可见，XMP-tiff 供程序自身识别
+    exif_tags["Keys:Software"] = SOFTWARE_MARKER
+    exif_tags["XMP-tiff:Software"] = SOFTWARE_MARKER
 
     ok, err = tool_mod.write_metadata(tool_paths, video_path, exif_tags)
     if ok or not allow_remux:

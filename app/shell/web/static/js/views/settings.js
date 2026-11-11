@@ -11,7 +11,7 @@ import { DEFAULT_CONFIG } from '../store.js';
 const TIP = {
   ffmpeg: 'ffmpeg：处理音视频的万能工具，负责截图和读时长。',
   ffprobe: 'ffprobe：ffmpeg 的兄弟，专门读视频信息（分辨率、时长、有没有声音）。',
-  exiftool: 'exiftool：专门改文件属性的工具，负责把标题写进视频内部。',
+  exiftool: 'exiftool：把标题/说明写进视频内部属性。写的是 MP4 的 Apple Keys 盒（Windows 资源管理器「属性→详细信息」读的就是它）+ ItemList（播放器）+ XMP（Jellyfin/Kodi）。注意：Windows 对 MP4 的「标记/关键词」列不读第三方写入的值，属系统限制；标题、说明、程序名称可正常显示。',
   whisper: 'Whisper：语音识别模型，把说的话变成字。',
   keyframe: '关键帧：从视频里挑出的代表性画面，挑得多看得准但更慢。',
   transcribe: '转写：把视频里说的话变成文字，帮 AI 判断内容。',
@@ -51,11 +51,26 @@ const TIP = {
   log_file: '日志文件：运行日志落盘位置，排错时看它。',
   pip_mirror: 'pip 源：装依赖（faster-whisper / CUDA 库）走哪个镜像，国内用清华/阿里更快。',
   hf_mirror: 'HuggingFace 端点：下载 Whisper 模型走哪个源；必须是 HF 兼容站点（hf-mirror.com 可以，modelscope.cn 不行）。',
+  asr_backend: '转写后端：auto = 优先用下面的 API、不可用时自动回退本地 faster-whisper（推荐）；local = 只用本机跑 faster-whisper（要下载模型，约 1.6GB）；api = 只用 HTTP 转写服务，不可用就报错、不回退。',
+  asr_prefer_api: '优先使用 API 接口 ASR：开 = 先试下方「转写后端」里的 API 地址，连不上或连续失败 2 次自动回退本地 Whisper；关 = 只用本地 Whisper。backend 选 local/api 时本开关不参与（由后端下拉直接决定）。',
+  asr_protocol: 'API 协议：openai = 任意 OpenAI 兼容的 /v1/audio/transcriptions（whisper.cpp server、LM Studio、硅基流动等）；gradio = Qwen3-ASR Pro 这类带界面和角色识别的 Gradio 服务。',
+  asr_base_url: '服务地址：OpenAI 协议填到 /v1 结尾（如 http://127.0.0.1:8080/v1）；Gradio 协议填到根路径（如 http://127.0.0.1:7867）。',
+  asr_model: 'OpenAI 协议的 model 字段：一般 whisper-1 或服务端实际注册的模型名；Gradio 协议不需要。',
+  asr_timeout: '单次转写最长等待秒数。长音频（超过 30 分钟）建议 900 以上，否则会被判超时。',
+  asr_diarize: '角色识别（说话人分离）：区分说话人，供 AI 分析对话主体；SRT 字幕不会带 [SPEAKER] 标签。只有 Gradio 协议支持。',
+  asr_hotwords: '热词：把常出现的专业术语、人名、品牌名填进来，能显著提升识别率。只有 Gradio 协议支持。',
+  asr_prompt: '提示词：给转写服务的上下文hint，例如「以下是关于深度学习的课程」。',
+  asr_maxchars: '单行字数：字幕每行最多几个字，超过就断行（遇到句末标点、说话人切换、超过 0.8 秒停顿也会断行）。英文按字符数算，一个单词不会硬拆开。20 是观看舒适的常规值。',
+  asr_punc: '标点断句：开启后会自动加逗号句号并据此断句；关闭则是一整段连续文本。',
+  model_download: '模型下载：large-v3-turbo 约 1.6GB，弱网会反复续传，可以随时关掉页面稍后再点（会接着下）。',
   prompt_sys: '系统提示词：给 AI 定身份与尺度，决定它用什么视角理解视频。',
   prompt_user: '用户提示词：规定输出格式，必须要求返回含 title / plot / tags 的 JSON。',
 };
 
 /** 开关分组（严格对应 §7.1 开关总表） */
+/** buildAsrPanel 的 renderAsrBody：顶部「优先使用 API」开关切换后联动刷新 API 参数区 */
+let asrRerender = null;
+
 const SWITCH_GROUPS = [
   {
     id: 'input',
@@ -69,6 +84,7 @@ const SWITCH_GROUPS = [
     label: '转写',
     items: [
       { id: 'enable_whisper', path: 'whisper.enable', label: '启用 Whisper 转写', desc: '关闭后跳过语音，纯画面分析', tip: TIP.whisper },
+      { id: 'prefer_api', path: 'whisper.prefer_api', label: '优先使用 API 接口 ASR', desc: '开：先走下方 API，不可用自动回退本地 Whisper；关：只用本地 Whisper', tip: TIP.asr_prefer_api, onChange: () => { if (asrRerender) asrRerender(); } },
       { id: 'use_gpu', path: 'whisper.use_gpu', label: 'GPU 加速转写', desc: '用显卡跑 Whisper；缺 CUDA 库会自动回退 CPU', tip: TIP.cuda },
       { id: 'srt_vad_filter', path: 'whisper.vad_filter', label: 'VAD 过滤', desc: '关闭后静音段也会送进模型', tip: TIP.transcribe },
     ],
@@ -210,6 +226,7 @@ export function createView(ctx) {
   let container = null;
   const unsubs = [];
   const switchRefs = {}; // id -> switch 元素
+  const rowRefs = {}; // id -> switch-row 容器（整行显隐用）
   const fieldRefs = []; // { field, input }
   const refs = { saveHint: null };
 
@@ -262,10 +279,12 @@ export function createView(ctx) {
       text: '?',
     }));
 
-    return h('div', { class: 'switch-row' }, [
+    const row = h('div', { class: 'switch-row' }, [
       h('div', { class: 'switch-meta' }, [labelRow, h('div', { class: 'switch-desc', text: item.desc })]),
       sw,
     ]);
+    rowRefs[item.id] = row;
+    return row;
   }
 
   function buildSwitchGroups() {
@@ -468,17 +487,69 @@ export function createView(ctx) {
     out.textContent = '';
     const libs = s.cuda_libs || {};
     const grid = h('div', { class: 'kv-grid' });
+    const backendLabel = s.backend === 'api' ? '仅自定义 API'
+      : s.backend === 'local' ? '仅本地 Whisper'
+      : `自动（优先 ${s.prefer_api ? 'API' : '本地'}）`;
+    grid.appendChild(kv('转写后端', backendLabel));
+    grid.appendChild(kv('实际生效', s.effective_backend === 'api' ? 'API' : '本地 Whisper'));
     grid.appendChild(kv('faster-whisper', s.faster_whisper ? '已安装' : '未安装'));
+
+    if (s.backend === 'api' || (s.backend === 'auto' && s.prefer_api && s.api_ready)) {
+      const api = s.api || {};
+      grid.appendChild(kv('API 协议', api.protocol === 'gradio' ? 'Gradio（Qwen3-ASR）' : 'OpenAI 兼容'));
+      grid.appendChild(kv('服务地址', api.base_url || '未填写'));
+      out.appendChild(grid);
+      if (s.backend === 'api' && !api.base_url) {
+        out.appendChild(h('div', {
+          class: 'env-warn',
+          text: '已选择「仅自定义 API」但还没填服务地址，转写会被跳过。填好地址后点「测试连接」。',
+        }));
+      }
+      if (s.backend === 'auto') {
+        out.appendChild(h('div', {
+          class: 'field-hint',
+          text: 'API 不可用时会自动回退本地 Whisper（连续失败 2 个文件后本批固定本地）。',
+        }));
+      }
+      return;
+    }
+
+    grid.appendChild(kv('模型', s.model || '—'));
+    grid.appendChild(kv('模型状态', s.model_ready ? '已就绪（离线加载）' : '未下载 / 不完整'));
     grid.appendChild(kv('GPU 开关', s.use_gpu ? '开启' : '关闭'));
     grid.appendChild(kv('CUDA 设备', s.cuda_available ? '可用' : '不可用'));
-    grid.appendChild(kv('CUDA 运行库', libs.present ? '已就位' : '缺失'));
+    grid.appendChild(kv('CUDA 运行库', libs.present ? (libs.reused ? '复用系统已装' : '已就位') : '缺失'));
     out.appendChild(grid);
+
+    if (s.model_path) out.appendChild(h('div', { class: 'env-log', text: `模型目录: ${s.model_path}` }));
+    // 续传进度：把已下载字节摆出来，弱网下用户能看到「确实在前进」
+    const dl = s.download;
+    if (!s.model_ready && dl && dl.modelBinBytes > 0) {
+      const mib = (dl.modelBinBytes / 1048576).toFixed(0);
+      const total = 1542;  // large-v3-turbo model.bin ≈ 1.5GiB
+      const pct = Math.min(100, (dl.modelBinBytes / (total * 1048576)) * 100).toFixed(1);
+      out.appendChild(h('div', {
+        class: 'env-log',
+        text: `已下载 model.bin：${mib}MB / 约 ${total}MB（${pct}%）——续传会从这里接着下`,
+      }));
+    }
     if (libs.cublas) out.appendChild(h('div', { class: 'env-log', text: `cublas: ${libs.cublas}` }));
     if (s.cuda_reason) out.appendChild(h('div', { class: 'env-log', text: `说明: ${s.cuda_reason}` }));
+    if (!s.model_ready) {
+      const usingApi = s.backend === 'api' || (s.backend === 'auto' && s.prefer_api && s.api_ready);
+      out.appendChild(h('div', {
+        class: 'env-warn',
+        text: usingApi
+          ? '本地模型未就绪：不影响转写（当前走 API）。需要离线转写时再点下方「下载 / 续传模型」把 large-v3-turbo（约 1.6GB）下完，弱网会反复续传。'
+          : '模型未就绪：点下方「下载 / 续传模型」把 large-v3-turbo（约 1.6GB）下完；'
+            + '弱网会反复续传，进度会实时显示。也可以改用「自定义 API」后端完全跳过下载。',
+      }));
+    }
     if (!libs.present) {
       out.appendChild(h('div', {
         class: 'env-warn',
-        text: '缺少 cublas64_12.dll 会让 GPU 转写挂起；点下方按钮自动补装到 libs/。',
+        text: '缺少 cublas64_12.dll 会让 GPU 转写挂起；点下方按钮自动补装到 libs/。'
+          + '（系统 Python 里已装过 nvidia-cublas-cu12 时会自动复用，不会重复下载）',
       }));
     }
   }
@@ -526,8 +597,8 @@ export function createView(ctx) {
     fixBtn.addEventListener('click', async () => {
       const old = fixBtn.textContent;
       fixBtn.disabled = true;
-      fixBtn.textContent = '正在下载…（可能数分钟）';
-      out.textContent = '正在向 libs/ 安装 nvidia-cublas-cu12 / nvidia-cudnn-cu12 …';
+      fixBtn.textContent = '正在检查…';
+      out.textContent = '正在检查 CUDA 运行库（系统已装过的会直接复用，不重复下载）…';
       try {
         const r = await apiClient.setupWhisper();
         for (const line of (r.logs || [])) out.appendChild(h('div', { class: 'env-log', text: line }));
@@ -542,6 +613,31 @@ export function createView(ctx) {
       }
     });
 
+    // 下载 / 续传 Whisper 模型：弱网会反复续传，进度条与日志实时更新
+    const modelBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '下载 / 续传模型' });
+    modelBtn.addEventListener('click', async () => {
+      const old = modelBtn.textContent;
+      modelBtn.disabled = true;
+      modelBtn.textContent = '下载中…（可随时关闭，稍后接着下）';
+      const modelOut = h('div', { class: 'env-status' });
+      modelOut.appendChild(h('div', { class: 'env-log', text: '开始下载模型…' }));
+      out.appendChild(modelOut);
+      try {
+        const r = await apiClient.downloadModel({ model: getPath(store.state.config, 'whisper.model', '') });
+        modelOut.textContent = '';
+        for (const line of (r.logs || [])) modelOut.appendChild(h('div', { class: 'env-log', text: line }));
+        if (!r.ok && r.error) modelOut.appendChild(h('div', { class: 'env-warn', text: r.error }));
+        toast(r.ok ? '模型已就绪，可离线加载' : '模型未下载完成（再点一次会续传）', r.ok ? 'ok' : 'warn', 5000);
+        await refreshEnv(true);
+      } catch (err) {
+        modelOut.textContent = `模型下载失败：${(err && (err.message || err.detail)) || '未知错误'}`;
+        toast('模型下载失败', 'err');
+      } finally {
+        modelBtn.disabled = false;
+        modelBtn.textContent = old;
+      }
+    });
+
     return h('div', { class: 'panel' }, [
       h('div', { class: 'panel-head' }, [
         h('span', { class: 'panel-title', text: '转写运行环境' }),
@@ -549,7 +645,7 @@ export function createView(ctx) {
         refreshBtn,
       ]),
       out,
-      h('div', { class: 'control-row' }, [installBtn, fixBtn]),
+      h('div', { class: 'control-row' }, [modelBtn, installBtn, fixBtn]),
     ]);
   }
 
@@ -658,6 +754,297 @@ export function createView(ctx) {
       input,
       h('div', { class: 'field-hint', text: hint }),
       chips,
+    ]);
+  }
+
+  // ---------- 自定义转写 API ----------
+  const ASR_PROTOCOLS = [
+    { value: 'openai', label: 'OpenAI 兼容（/v1/audio/transcriptions）' },
+    { value: 'gradio', label: 'Gradio 服务（Qwen3-ASR Pro）' },
+  ];
+
+  function buildAsrField(field) {
+    const value = getPath(store.state.config, field.path, '');
+    let input;
+    if (field.type === 'select') {
+      input = h('select', { class: 'field-select' });
+      for (const opt of field.options || []) {
+        const val = typeof opt === 'string' ? opt : opt.value;
+        const label = typeof opt === 'string' ? opt : opt.label;
+        input.appendChild(h('option', { value: val, text: label }));
+      }
+      input.value = value;
+    } else if (field.type === 'bool') {
+      input = h('button', {
+        class: 'switch', type: 'button', role: 'switch',
+        'aria-checked': 'false', 'aria-label': field.label,
+      }, [h('span', { class: 'switch-knob' })]);
+      const on = !!value;
+      input.classList.toggle('is-on', on);
+      input.setAttribute('aria-checked', on ? 'true' : 'false');
+      input.addEventListener('click', () => {
+        const next = !getPath(store.state.config, field.path, false);
+        input.classList.toggle('is-on', next);
+        input.setAttribute('aria-checked', next ? 'true' : 'false');
+        commit(setPath(store.state.config, field.path, next));
+      });
+      fieldRefs.push({ field, input, kind: 'bool' });
+      return h('div', { class: 'switch-row' }, [
+        h('div', { class: 'switch-meta' }, [
+          h('div', { class: 'switch-label' }, [field.label, h('span', {
+            class: 'tip', tabindex: '0', 'data-tip': field.tip || field.hint, text: '?',
+          })]),
+          field.hint ? h('div', { class: 'switch-desc', text: field.hint }) : null,
+        ]),
+        input,
+      ]);
+    } else {
+      input = h('input', {
+        class: 'field-input',
+        type: field.type || 'text',
+        value: value === undefined || value === null ? '' : value,
+        step: field.step,
+        min: field.min,
+        placeholder: field.placeholder || '',
+      });
+      input.addEventListener('change', () => {
+        const raw = input.value;
+        const next = field.type === 'number' ? (raw === '' ? 0 : Number(raw)) : raw.trim();
+        commit(setPath(store.state.config, field.path, next));
+      });
+    }
+
+    if (input.tagName !== 'BUTTON') {
+      fieldRefs.push({ field, input, kind: 'input' });
+    }
+    return h('div', { class: 'field' }, [
+      h('div', { class: 'field-label' }, [field.label, h('span', {
+        class: 'tip', tabindex: '0', 'data-tip': field.tip || field.hint, text: '?',
+      })]),
+      input,
+      field.hint ? h('div', { class: 'field-hint', text: field.hint }) : null,
+    ]);
+  }
+
+  function buildAsrPanel() {
+    const backendSel = h('select', { class: 'field-select' });
+    for (const opt of [
+      { value: 'auto', label: '自动（优先 API，失败回退本地）' },
+      { value: 'local', label: '仅本地 faster-whisper（需下载模型）' },
+      { value: 'api', label: '仅自定义 HTTP API（不回退）' },
+    ]) {
+      backendSel.appendChild(h('option', { value: opt.value, text: opt.label }));
+    }
+    backendSel.value = getPath(store.state.config, 'whisper.backend', 'auto');
+    backendSel.addEventListener('change', () => {
+      commit(setPath(store.state.config, 'whisper.backend', backendSel.value));
+      renderAsrBody();
+    });
+    fieldRefs.push({ field: { path: 'whisper.backend' }, input: backendSel, kind: 'input' });
+
+    // 「优先使用 API」开关已提升到上方「转写」开关分组（SWITCH_GROUPS.prefer_api），
+    // 这里只保留 backend 下拉与 API 参数区，避免同一配置两个开关。
+
+    // 「本地模型缺失时允许联网下载」开关（默认关：弱网会把整批任务卡死）
+    const dlBtn = h('button', {
+      class: 'switch', type: 'button', role: 'switch',
+      'aria-checked': 'false', 'aria-label': '本地模型缺失时自动联网下载',
+    }, [h('span', { class: 'switch-knob' })]);
+    const dlWrap = h('div', { class: 'switch-row' }, [
+      h('div', { class: 'switch-meta' }, [
+        h('div', { class: 'switch-label' }, ['本地模型缺失时自动联网下载']),
+        h('div', { class: 'switch-desc', text: '关闭（推荐）：本地模型没下完就直接跳过转写，不再花几分钟去拉 1.6GB；模型请在下方「转写运行环境 → 下载 / 续传模型」里显式下载' }),
+      ]),
+      dlBtn,
+    ]);
+    dlBtn.addEventListener('click', () => {
+      const next = getPath(store.state.config, 'whisper.allow_download', false) !== true;
+      dlBtn.classList.toggle('is-on', next);
+      dlBtn.setAttribute('aria-checked', next ? 'true' : 'false');
+      commit(setPath(store.state.config, 'whisper.allow_download', next));
+    });
+    fieldRefs.push({ field: { path: 'whisper.allow_download' }, input: dlBtn, kind: 'bool' });
+
+    const body = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } });
+
+    function renderAsrBody() {
+      asrRerender = renderAsrBody;
+      body.textContent = '';
+      const backend = getPath(store.state.config, 'whisper.backend', 'auto');
+      const prefer = getPath(store.state.config, 'whisper.prefer_api', true) !== false;
+      const allowDl = getPath(store.state.config, 'whisper.allow_download', false) === true;
+      dlWrap.style.display = backend === 'api' ? 'none' : '';
+      dlBtn.classList.toggle('is-on', allowDl);
+      dlBtn.setAttribute('aria-checked', allowDl ? 'true' : 'false');
+
+      // API 参数区与「测试连接」按钮常驻显示：
+      // 用户随时可以填地址、先测通再打开「优先使用 API 接口 ASR」开关，
+      // 不能因为当前开关关着就把入口藏起来（这正是之前「找不到测试连接」的原因）。
+      let tipText;
+      let tipWarn = false;
+      if (backend === 'api') {
+        tipText = '只用下面的 API：不可用时转写会被跳过（不回退本地）。';
+      } else if (backend === 'local') {
+        tipText = '当前「转写后端」= 仅本地 Whisper，下面的 API 地址不会用于转写；可先点「测试连接」验证地址，再把后端改成 auto 或 api。';
+        tipWarn = true;
+      } else if (prefer) {
+        tipText = '先试下面的 API；连不上或连续失败 2 个文件后，本批自动固定用本地 Whisper。';
+      } else {
+        tipText = '「优先使用 API 接口 ASR」开关已关闭：当前直接用本地 Whisper。填好地址点「测试连接」通过后，打开上方开关即改走 API。';
+        tipWarn = true;
+      }
+      body.appendChild(h('div', {
+        class: 'field-hint' + (tipWarn ? ' warn-text' : ''),
+        text: tipText,
+      }));
+
+      const grid = h('div', { class: 'form-grid' });
+      const fields = [
+        {
+          path: 'whisper.api.protocol', label: 'API 协议 whisper.api.protocol',
+          type: 'select', options: ASR_PROTOCOLS, tip: TIP.asr_protocol,
+          hint: 'openai = 通用兼容接口；gradio = Qwen3-ASR Pro',
+        },
+        {
+          path: 'whisper.api.base_url', label: '服务地址 whisper.api.base_url', type: 'text',
+          placeholder: 'http://127.0.0.1:7867', tip: TIP.asr_base_url,
+          hint: 'OpenAI 协议填到 /v1 结尾；Gradio 协议填根路径',
+        },
+        {
+          path: 'whisper.api.api_key', label: 'api_key whisper.api.api_key', type: 'password',
+          hint: '本地服务可留空；云端服务填真实密钥', tip: TIP.api_key,
+        },
+        {
+          path: 'whisper.api.model', label: 'model whisper.api.model', type: 'text',
+          placeholder: 'whisper-1', hint: 'OpenAI 协议的模型名；Gradio 协议可留空', tip: TIP.asr_model,
+        },
+        {
+          path: 'whisper.api.timeout', label: '超时(秒) whisper.api.timeout', type: 'number',
+          step: '30', min: '30', hint: '长音频建议 900 以上', tip: TIP.asr_timeout,
+        },
+        {
+          path: 'whisper.api.prompt', label: '提示词 whisper.api.prompt', type: 'text',
+          hint: '给服务的上下文提示（OpenAI 协议）', tip: TIP.asr_prompt,
+        },
+        {
+          path: 'whisper.api.max_chars', label: '单行字数 whisper.api.max_chars', type: 'number',
+          step: '5', min: '5', hint: '客户端聚合字幕行时每行最多几个字（Gradio）', tip: TIP.asr_maxchars,
+        },
+        {
+          path: 'whisper.api.hotwords', label: '热词 whisper.api.hotwords', type: 'text',
+          hint: '专业术语 / 人名，提升识别率（Gradio）', tip: TIP.asr_hotwords,
+        },
+        {
+          path: 'whisper.api.diarize', label: '角色识别', type: 'bool',
+          hint: '区分说话人（供 AI 分析），字幕不带角色标签（Gradio）', tip: TIP.asr_diarize,
+        },
+        {
+          path: 'whisper.api.punc', label: '标点断句', type: 'bool',
+          hint: '自动加标点并据此断行（Gradio）', tip: TIP.asr_punc,
+        },
+      ];
+      for (const f of fields) grid.appendChild(buildAsrField(f));
+      body.appendChild(grid);
+      body.appendChild(buildAsrTestPanel());
+    }
+
+    renderAsrBody();
+
+    return h('div', { class: 'panel' }, [
+      h('div', { class: 'panel-head' }, [
+        h('span', { class: 'panel-title', text: '转写后端' }),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'panel-hint', text: '优先 API，不可用时自动回退本地' }),
+      ]),
+      h('div', { class: 'form-grid' }, [
+        h('div', { class: 'field' }, [
+          h('div', { class: 'field-label' }, ['转写后端 whisper.backend', h('span', {
+            class: 'tip', tabindex: '0', 'data-tip': TIP.asr_backend, text: '?',
+          })]),
+          backendSel,
+          h('div', { class: 'field-hint', text: 'auto = 优先 API；local = 仅本机；api = 仅远程' }),
+        ]),
+        h('div', { class: 'field' }, [
+          h('div', { class: 'field-label' }, ['优先开关位置', h('span', {
+            class: 'tip', tabindex: '0', 'data-tip': TIP.asr_prefer_api, text: '?',
+          })]),
+          h('div', { class: 'field-hint', text: '「优先使用 API 接口 ASR」开关在上方「转写」分组里：backend=auto 时它决定先试 API 还是直接本地；backend=local/api 时由后端下拉直接决定。' }),
+        ]),
+      ]),
+      dlWrap,
+      body,
+    ]);
+  }
+
+  function buildAsrTestPanel() {
+    const btn = h('button', { class: 'btn btn-primary', type: 'button', text: '测试连接' });
+    const deepBtn = h('button', {
+      class: 'btn', type: 'button', text: '真实转写测试（3~10s 测试音频）',
+      title: '用 ffmpeg 合成一段测试语音，真跑一次转写，验证模型真的能出字',
+    });
+    const out = h('div', { class: 'ai-test-result', hidden: true });
+
+    async function runTest(deep) {
+      const api = getPath(store.state.config, 'whisper.api', {}) || {};
+      btn.disabled = true;
+      deepBtn.disabled = true;
+      out.hidden = false;
+      out.className = 'ai-test-result is-pending';
+      out.textContent = deep
+        ? '正在合成测试语音并真实转写（约 5~20 秒）…'
+        : '正在探测转写服务…';
+      try {
+        const r = await apiClient.testASR({
+          protocol: api.protocol,
+          base_url: api.base_url,
+          api_key: api.api_key,
+          model: api.model,
+          timeout: api.timeout,
+          deep: !!deep,
+        });
+        out.textContent = '';
+        out.className = `ai-test-result ${r.ok ? 'is-ok' : 'is-err'}`;
+        out.appendChild(h('div', {
+          class: 'ai-test-head',
+          text: r.ok
+            ? (deep ? '真实转写成功' : '转写服务可用')
+            : (deep ? '真实转写失败' : '转写服务不可用'),
+        }));
+        const grid = h('div', { class: 'kv-grid' });
+        grid.appendChild(kv('可达', r.reachable ? '是' : '否'));
+        if (r.latencyMs) grid.appendChild(kv('探测延迟', `${r.latencyMs} ms`));
+        grid.appendChild(kv('协议', r.protocol));
+        const d = r.deep;
+        if (d) {
+          grid.appendChild(kv('真实转写', d.ok ? '成功' : '失败'));
+          if (d.elapsedMs) grid.appendChild(kv('转写耗时', `${(d.elapsedMs / 1000).toFixed(1)} s`));
+          if (d.segments) grid.appendChild(kv('字幕条数', String(d.segments)));
+        }
+        out.appendChild(grid);
+        if (r.detail) out.appendChild(h('div', { class: 'env-log', text: r.detail }));
+        if (d && d.text) out.appendChild(h('div', { class: 'env-log', text: `识别结果：${d.text}` }));
+        if (!r.ok && r.error) out.appendChild(h('div', { class: 'ai-test-err', text: r.error }));
+        toast(r.ok ? (deep ? '真实转写成功' : '转写 API 正常') : '转写 API 不可用',
+              r.ok ? 'ok' : 'err', 3600);
+      } catch (err) {
+        out.className = 'ai-test-result is-err';
+        out.textContent = `测试失败：${(err && (err.message || err.detail)) || '未知错误'}`;
+      } finally {
+        btn.disabled = false;
+        deepBtn.disabled = false;
+      }
+    }
+
+    btn.addEventListener('click', () => runTest(false));
+    deepBtn.addEventListener('click', () => runTest(true));
+
+    return h('div', { style: { marginTop: '4px' } }, [
+      h('div', { class: 'control-row' }, [btn, deepBtn]),
+      h('div', {
+        class: 'field-hint',
+        text: '「测试连接」只探协议层（秒回）；「真实转写测试」会合成一段语音真跑一次，能证明模型真能出字。',
+      }),
+      out,
     ]);
   }
 
@@ -783,6 +1170,11 @@ export function createView(ctx) {
         const on = getVal(item, cfg);
         sw.classList.toggle('is-on', on);
         sw.setAttribute('aria-checked', on ? 'true' : 'false');
+        const row = rowRefs[item.id];
+        if (row) {
+          const shown = typeof item.visible === 'function' ? item.visible(cfg) : true;
+          row.style.display = shown ? '' : 'none';
+        }
       }
     }
 
@@ -833,6 +1225,7 @@ export function createView(ctx) {
       buildPromptPanel(),
       buildAITestPanel(),
       buildFormPanel('高级参数', 'frames / whisper / naming / runtime', ADVANCED_FIELDS),
+      buildAsrPanel(),
       buildMirrorPanel(),
       buildEnvPanel(),
       buildGlossary(),
@@ -848,6 +1241,8 @@ export function createView(ctx) {
     unsubs.length = 0;
     container = null;
     for (const key of Object.keys(switchRefs)) delete switchRefs[key];
+    for (const key of Object.keys(rowRefs)) delete rowRefs[key];
+    asrRerender = null;
     fieldRefs.length = 0;
     refs.saveHint = null;
     refs.aiTestOut = null;

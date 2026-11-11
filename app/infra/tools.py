@@ -414,50 +414,41 @@ def remux_mp4(
 # ------------------------------------------------------------------
 # exiftool 元数据
 # ------------------------------------------------------------------
-def write_metadata(
+def _safe_exif_path(path: str) -> str:
+    """给 exiftool 用的路径：优先返回原路径，中文名走「临时 ASCII 硬链接」不行，
+    因此这里直接返回原路径 —— 中文文件名由调用方用 UTF-8 ArgFile 处理。
+
+    ★ 不要用 GetShortPathNameW 生成的 8.3 短名交给 exiftool：
+      exiftool 写入时会把短名当成真实文件名，结果文件被**改名**成
+      `中文测~1.MP4`（实测），用户的视频名字就毁了。
+    """
+    return path
+
+
+def _run_argfile(
     tools: ToolPaths,
-    video_path: str,
-    tags: Dict[str, str],
+    lines: List[str],
+    encoding: str,
     *,
+    video_path: str,
     timeout: float = 120,
 ) -> Tuple[bool, str]:
-    """用 exiftool 就地写入元数据（零拷贝，毫秒级）。
+    """把参数写进 ArgFile 交给 exiftool。
 
-    关键点（Windows 中文环境实测）：
-      1. 优先用 `perl.exe + exiftool.pl` 调用，**不要**直接用 exiftool(-k).exe ——
-         后者名字里的 `-k` 会让 exiftool 结束后「-- press ENTER --」等待输入，
-         在 subprocess 里表现为永久挂起。
-      2. 通过 `-@ ArgFile`（UTF-8）传参，规避中文路径 / 中文值 / 命令行长度 / GBK 乱码。
-      3. 必须显式 `-charset exiftool=UTF8`，否则中文值会被写成 `???`。
-    返回 (是否成功, 错误信息)。
+    ★ 视频路径必须作为**独立命令行参数**传，不能写进 ArgFile：
+      中文文件名写进 GBK 的 ArgFile 时，exiftool 会按 ANSI 再解码一次，
+      报 `FileName encoding must be specified` 并可能把文件当成新文件处理。
+      走 argv 时 Windows 交给 perl 的是 Unicode，路径永远正确。
+    （ArgFile 只放「标签值」，这样 GBK 只影响值、不影响路径。）
     """
-    if not tools.exiftool:
-        return False, "exiftool 不可用"
-    if not tags:
-        return True, ""
-
-    # ArgFile 采用 UTF-8，每条参数一行
-    lines: List[str] = [
-        "-overwrite_original",
-        "-charset", "exiftool=UTF8",
-        "-charset", "filename=UTF8",
-    ]
-    for key, value in tags.items():
-        text = str(value).replace("\r", " ").replace("\n", " ").strip()
-        if not text:
-            continue
-        lines.append(f"-{key}={text}")
-    lines.append(str(video_path))
-
     argfile = None
     try:
         fd, argfile = tempfile.mkstemp(suffix=".args", dir=str(_tmp_dir()))
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        with os.fdopen(fd, "w", encoding=encoding, errors="replace", newline="\n") as fh:
             fh.write("\n".join(lines) + "\n")
-
         # 注意：必须是两个独立参数 ["-@", argfile]，写成 "-@"+argfile 会被
         # 解析成无效 tag（Windows 下 perl 版 exiftool 实测）。
-        cmd = build_exiftool_command(tools.exiftool, ["-@", argfile])
+        cmd = build_exiftool_command(tools.exiftool, ["-@", argfile, str(video_path)])
         if cmd is None:
             return False, "exiftool 调用方式不可用"
         proc = run(cmd, timeout=timeout)
@@ -473,6 +464,83 @@ def write_metadata(
                 os.unlink(argfile)
             except OSError:
                 pass
+
+
+def write_metadata(
+    tools: ToolPaths,
+    video_path: str,
+    tags: Dict[str, str],
+    *,
+    timeout: float = 120,
+) -> Tuple[bool, str]:
+    """用 exiftool 就地写入元数据（零拷贝，毫秒级）。
+
+    分两遍写，这是实测出来的唯一能「Windows 属性面板 + 播放器」都正确的组合：
+
+      第 1 遍（UTF-8）：ItemList / XMP —— 给播放器、Jellyfin、Kodi 看。
+      第 2 遍（GBK）  ：QuickTime「Keys」盒 —— Windows 资源管理器属性面板读的是它。
+
+    为什么必须分两遍、且编码不同（本机 ExifTool 13.59 实测）：
+      - Windows 属性面板按**系统 ANSI 代码页（中文 = GBK）**解码 Keys 盒字符串。
+        若 Keys 里存 UTF-8 中文，面板显示「榛勮壊鑺辫-榛戜笣缇庡コ」这类乱码，
+        用户看到的就是「元数据没生效」。
+      - 但 ItemList/XMP 必须存 UTF-8（规范要求），否则播放器显示乱码。
+      - exiftool 的 `-charset exiftool=` **只认 Latin/UTF8 等**，不认 cp936，
+        所以不能靠 charset 参数切换，只能靠「ArgFile 本身用哪种编码写字节」。
+        exiftool 会把 ArgFile 里的字节原样写入文件，因此：
+            ArgFile 用 UTF-8 存 → 文件里就是 UTF-8
+            ArgFile 用 GBK  存 → 文件里就是 GBK（Windows 正好按 GBK 读）
+      - 第 2 遍的路径参数走 argv（Windows 交给 perl 的是 Unicode），不要加
+        `-charset filename=UTF8`：实测它会让中文路径变成 File not found。
+
+    返回 (是否成功, 错误信息)。两遍里任一遍成功即算成功（另一遍失败只影响
+    对应端的显示，不该让整个落盘判失败），但错误信息会合并返回便于排查。
+    """
+    if not tools.exiftool:
+        return False, "exiftool 不可用"
+    if not tags:
+        return True, ""
+
+    def _clean(value: str) -> str:
+        return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+    # 按目标命名空间分组：Keys 走 GBK，其余走 UTF-8
+    keys_tags: Dict[str, str] = {}
+    utf8_tags: Dict[str, str] = {}
+    for key, value in tags.items():
+        text = _clean(value)
+        if not text:
+            continue
+        if key.lower().startswith("keys:"):
+            keys_tags[key] = text
+        else:
+            utf8_tags[key] = text
+
+    errors: List[str] = []
+    ok_any = False
+
+    # ---------- 第 1 遍：UTF-8（ItemList / XMP） ----------
+    if utf8_tags:
+        lines = ["-overwrite_original", "-charset", "exiftool=UTF8",
+                 "-charset", "filename=UTF8"]
+        lines += [f"-{k}={v}" for k, v in utf8_tags.items()]
+        ok, err = _run_argfile(tools, lines, "utf-8", video_path=str(video_path), timeout=timeout)
+        ok_any = ok_any or ok
+        if not ok:
+            errors.append(f"UTF-8 写入失败：{err}")
+
+    # ---------- 第 2 遍：GBK（QuickTime Keys，Windows 属性面板） ----------
+    if keys_tags:
+        lines = ["-overwrite_original"]
+        lines += [f"-{k}={v}" for k, v in keys_tags.items()]
+        ok2, err2 = _run_argfile(tools, lines, "gbk", video_path=str(video_path), timeout=timeout)
+        ok_any = ok_any or ok2
+        if not ok2:
+            errors.append(f"Keys 写入失败：{err2}")
+
+    if ok_any:
+        return True, ""
+    return False, "；".join(errors) or "exiftool 写入失败"
 
 
 def _clean_stderr(raw: bytes) -> str:
@@ -533,19 +601,42 @@ def read_metadata(
     *,
     timeout: float = 30,
 ) -> Dict[str, str]:
-    """读取视频元数据（JSON）。失败返回空 dict。"""
+    """读取视频元数据（JSON）。失败返回空 dict。
+
+    中文路径必须走 `-@ ArgFile`，且 **ArgFile 用 UTF-8 + `-charset filename=UTF8`**
+    （实测的四种组合里只有这种既成功又无警告）：
+      - 直接当命令行参数传中文路径 → `File not found`（Windows 按 GBK 重解码）
+      - ArgFile 用 GBK + filename=UTF8 → 同样 File not found
+      - ArgFile 用 GBK + filename=cp936 → 能读，但会报 FileName encoding 警告
+      - ArgFile 用 UTF-8 + filename=UTF8 → ✅ 正确
+    注意这与 write_metadata 不同：**写**的时候 exiftool 按 ANSI(GBK) 解码 ArgFile
+    才不会有乱码，而**读**的时候路径参数必须用 UTF-8。两者不能混用同一份编码。
+    """
     if not tools.exiftool:
         return {}
-    cmd = build_exiftool_command(
-        tools.exiftool,
-        ["-j", "-G1", "-s", "-charset", "filename=UTF8", str(video_path)],
-    )
-    if cmd is None:
-        return {}
+
+    argfile = None
     try:
+        fd, argfile = tempfile.mkstemp(suffix=".args", dir=str(_tmp_dir()))
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join([
+                "-j", "-G1", "-s",
+                "-charset", "filename=UTF8",
+                str(video_path),
+            ]) + "\n")
+        cmd = build_exiftool_command(tools.exiftool, ["-@", argfile])
+        if cmd is None:
+            return {}
         proc = run(cmd, timeout=timeout)
-    except ToolError:
+    except (ToolError, OSError):
         return {}
+    finally:
+        if argfile:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
+
     if proc.returncode != 0 or not proc.stdout:
         return {}
     try:

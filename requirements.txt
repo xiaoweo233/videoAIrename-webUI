@@ -23,6 +23,10 @@ openai>=1.0
 faster-whisper>=1.0
 tqdm>=4.66
 
+# ---------- 按需：远程 ASR（whisper.backend=auto/api 且 protocol=gradio）----------
+# 访问 Qwen3-ASR Pro 这类 Gradio 服务必需；用 openai 协议或纯本地转写可不装。
+gradio_client>=1.0
+
 # ---------- 按需：Gemini 后端（ai.provider=gemini 时需要）----------
 google-genai>=1.0
 

@@ -173,6 +173,11 @@ class RenameEngine:
                     use_gpu=bool(w_cfg.get("use_gpu", True)),
                     download_root=str(MODELS_DIR / "whisper"),
                     on_log=lambda lv, msg: self._log(lv, msg),
+                    backend=w_cfg.get("backend", "auto"),
+                    api_config=w_cfg.get("api") or {},
+                    prefer_api=bool(w_cfg.get("prefer_api", True)),
+                    # 默认不允许运行时自动下载模型：弱网会卡住整批任务
+                    allow_download=bool(w_cfg.get("allow_download", False)),
                 )
             return self._whisper
 
@@ -228,6 +233,10 @@ class RenameEngine:
         self._context_warned = False
         self._error_files.clear()
         self.stats = JobStats()
+        # 新一批：清掉上一批的远程/模型失败终态，让已恢复的 API 服务重新被尝试
+        # （否则「远程挂过一次」会永久把本进程锁死在本地 Whisper 上）
+        if self._whisper is not None:
+            self._whisper.reset_task_state()
 
         # ---------- 扫描 ----------
         self.bus.emit_phase(Phase.PROBE, "start")

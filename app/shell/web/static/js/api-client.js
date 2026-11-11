@@ -176,6 +176,16 @@ export class ApiClient {
     return this.post('/whisper/install', {}, { timeout: 1800000 });
   }
 
+  /** 测试自定义转写 API 是否可用 @param {Object} [payload] */
+  testASR(payload = {}) {
+    return this.post('/whisper/test', payload, { timeout: 60000 });
+  }
+
+  /** 下载 / 续传 Whisper 模型（弱网很慢，超时放到 1 小时） */
+  downloadModel(payload = {}) {
+    return this.post('/whisper/model', payload, { timeout: 3600000 });
+  }
+
   /** 读取下载镜像预设与当前配置 */
   getMirrors() {
     return this.get('/mirrors');

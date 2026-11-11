@@ -107,6 +107,22 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _no_cache_static(request, call_next):
+    """前端 JS/CSS 一律「可缓存但每次校验」（协商缓存）。
+
+    不加这个的话，改完 settings.js 刷新页面仍可能拿到浏览器里的旧副本 ——
+    表现就是「代码明明加了开关/按钮，界面上却看不到」。
+    文件没变时浏览器会收到 304，代价只是一次条件请求。
+    """
+    response = await call_next(request)
+    path = (request.url.path or "")
+    if (path.startswith("/js/") or path.startswith("/css/")
+            or path in ("/", "/index.html")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 # ------------------------------------------------------------------
 # 请求模型
 # ------------------------------------------------------------------
@@ -134,6 +150,25 @@ class AITestBody(BaseModel):
     api_key: Optional[str] = None
     model: Optional[str] = None
     timeout: Optional[int] = None
+
+
+class ASRTestBody(BaseModel):
+    """自定义转写 API 的测试参数。"""
+
+    protocol: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    timeout: Optional[int] = None
+    # deep=True 时：生成一段 3~10s 的测试语音并真跑一次转写（验证模型真可用）
+    deep: bool = False
+
+
+class ModelDownloadBody(BaseModel):
+    """Whisper 模型下载参数。"""
+
+    model: Optional[str] = None
+    force: Optional[bool] = False
 
 
 # ------------------------------------------------------------------
@@ -174,22 +209,105 @@ def set_server_info(host: str, port: int) -> None:
     os.environ["VAIR_PORT"] = str(SERVER_INFO["port"])
 
 
+def _is_fake_ip(ip: str) -> bool:
+    """判断是不是「不能用」的地址。
+
+    本机实测（用户机器上装了对代理软件）：
+      - gethostname() 解析出 198.18.0.1 和 192.168.1.108；
+      - socket.connect(("8.8.8.8", 80)) 拿到 198.18.0.1（被 TUN 劫持）。
+    198.18.0.0/15 是 RFC 2544 保留的**基准测试网段**，代理软件（Clash/Surge 的
+    TUN 模式等）会把它当假地址用。手机根本连不上，因此必须排除。
+    """
+    try:
+        parts = [int(x) for x in ip.split(".")]
+    except (ValueError, AttributeError):
+        return True
+    if len(parts) != 4 or any(x < 0 or x > 255 for x in parts):
+        return True
+    a, b = parts[0], parts[1]
+    if a == 127:                              # 回环
+        return True
+    if a == 169 and b == 254:                 # 链路本地（没连上 DHCP）
+        return True
+    if a == 198 and b in (18, 19):            # RFC 2544 基准测试网段（代理 TUN）
+        return True
+    if a == 0:
+        return True
+    if a >= 224:                              # 组播 / 保留
+        return True
+    return False
+
+
 def _lan_ips(limit: int = 6) -> list:
-    """列出本机局域网 IPv4（去重、排除回环）。"""
+    """列出本机真实可用的局域网 IPv4（排除回环 / 代理 TUN 假地址）。
+
+    顺序按「手机最可能连上的」排：先 192.168 / 10. / 172.16-31 这类私有网段。
+    """
     import socket
 
-    ips = []
+    candidates: list = []
+
+    def _add(ip: str) -> None:
+        if not ip or _is_fake_ip(ip) or ip in candidates:
+            return
+        candidates.append(ip)
+
+    # 1) 主动连一个「内网」地址：走默认路由，拿到的是真实出口网卡
+    #    连公网（8.8.8.8）会被代理劫持成 198.18.x，必须连内网网关或私有地址。
+    for probe in ("192.168.1.1", "10.0.0.1", "172.16.0.1"):
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.3)
+            s.connect((probe, 80))
+            _add(s.getsockname()[0])
+        except OSError:
+            pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+    # 2) 主机名解析（能覆盖多网卡场景）
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip.startswith("127.") or ip in ips:
-                continue
-            ips.append(ip)
-            if len(ips) >= limit:
-                break
+            _add(info[4][0])
     except OSError:
         pass
-    return ips
+
+    # 3) 兜底：Windows 上枚举网卡（前两步都失败时）
+    if not candidates:
+        try:
+            import subprocess
+
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-NetIPAddress -AddressFamily IPv4 | "
+                 "Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | "
+                 "Select-Object -ExpandProperty IPAddress"],
+                capture_output=True, text=True, timeout=8,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            for line in (proc.stdout or "").splitlines():
+                _add(line.strip())
+        except Exception:  # noqa: BLE001 - 兜底失败不影响主流程
+            pass
+
+    # 私有网段优先（手机一定在同一个私有网段里）
+    def _rank(ip: str) -> int:
+        a, b = int(ip.split(".")[0]), int(ip.split(".")[1])
+        if a == 192 and b == 168:
+            return 0
+        if a == 10:
+            return 1
+        if a == 172 and 16 <= b <= 31:
+            return 2
+        return 3
+
+    candidates.sort(key=_rank)
+    return candidates[:limit]
 
 
 @app.get("/api/server")
@@ -313,14 +431,227 @@ def ai_test(body: AITestBody = Body(default_factory=AITestBody)) -> Dict[str, An
 @app.get("/api/whisper/status")
 async def whisper_status() -> Dict[str, Any]:
     report = bootstrap.probe_runtime()
+    w = config.whisper
+    backend = str(w.get("backend") or "auto").lower()
+    prefer_api = bool(w.get("prefer_api", True))
+    api_cfg = w.get("api") or {}
+    api_base = str(api_cfg.get("base_url") or "").strip()
+
+    # 推得「本该生效」的后端（尚未运行时无法知道实际回退结果）
+    if backend == "api":
+        effective = "api"
+    elif backend == "local":
+        effective = "local"
+    else:
+        effective = "api" if (prefer_api and api_base) else "local"
+
+    # 本地模型是否已就绪（目录存在且关键文件齐全）
+    local_ready = False
+    local_path = ""
+    model_dir = ""
+    download_hint = None
+    try:
+        from ...core.whisper import resolve_local_model
+        from ...infra.paths import MODELS_DIR
+
+        model_name = str(w.get("model") or "large-v3-turbo")
+        root = MODELS_DIR / "whisper"
+        local_path = resolve_local_model(model_name, str(root))
+        local_ready = bool(local_path)
+        model_dir = str(root / model_name)
+        if not local_ready:
+            download_hint = _model_download_progress(root / model_name)
+    except Exception:  # noqa: BLE001 - 探测失败不阻断状态查询
+        pass
+
     return {
         "faster_whisper": report.faster_whisper,
         "cuda_available": report.cuda_available,
         "cuda_reason": report.cuda_reason,
         "cuda_libs": bootstrap.cuda_libs_status(),
-        "use_gpu": bool(config.whisper.get("use_gpu", True)),
-        "device": config.whisper.get("device", "auto"),
+        "use_gpu": bool(w.get("use_gpu", True)),
+        "device": w.get("device", "auto"),
+        # 后端与模型状态
+        "backend": backend,
+        "prefer_api": prefer_api,
+        "effective_backend": effective,
+        "api_ready": bool(api_base),
+        "model": w.get("model", "large-v3-turbo"),
+        "model_ready": local_ready,
+        "model_path": local_path,
+        "model_dir": model_dir,
+        "download": download_hint,
+        "api": {
+            "protocol": api_cfg.get("protocol", "openai"),
+            "base_url": api_base,
+            "model": api_cfg.get("model", ""),
+        },
     }
+
+
+def _model_download_progress(model_dir) -> Optional[Dict[str, Any]]:
+    """汇总模型目录里已下载的字节，给界面显示「已下载 / 总计」。
+
+    只看 model.bin（它占了 99% 的体积），并把 .incomplete 与半成品 model.bin
+    中较大的那份算作已下载 —— 这与 _download_one_file 的续传起点一致。
+    """
+    try:
+        from pathlib import Path
+
+        d = Path(model_dir)
+        if not d.is_dir():
+            return None
+        main = d / "model.bin"
+        part = d / "model.bin.incomplete"
+        have = 0
+        for p in (main, part):
+            try:
+                if p.is_file():
+                    have = max(have, p.stat().st_size)
+            except OSError:
+                pass
+        files = []
+        for p in sorted(d.iterdir()):
+            if not p.is_file():
+                continue
+            files.append({"name": p.name, "size": p.stat().st_size})
+        return {"dir": str(d), "modelBinBytes": have, "files": files}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.post("/api/whisper/model")
+def whisper_download_model(body: ModelDownloadBody = Body(default_factory=ModelDownloadBody)) -> Dict[str, Any]:
+    """下载 / 续传 Whisper 模型到 models/whisper/<model>/（断点续传，弱网可反复重试）。"""
+    w = config.whisper
+    model_name = (body.model or w.get("model") or "large-v3-turbo").strip()
+    logs: List[str] = []
+
+    def _log(msg: str) -> None:
+        logs.append(msg)
+        event_bus.emit_log("INFO", msg, source="model-download")
+
+    from ...infra.paths import MODELS_DIR
+
+    try:
+        result = bootstrap.download_whisper_model(
+            model_name,
+            on_log=_log,
+            download_root=str(MODELS_DIR / "whisper"),
+            force=bool(body.force),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"模型下载失败：{exc}") from exc
+
+    return {"ok": bool(result.get("ok")), "path": result.get("path", ""),
+            "error": result.get("error", ""), "logs": logs, "model": model_name}
+
+
+@app.post("/api/whisper/test")
+def whisper_test_api(body: ASRTestBody = Body(default_factory=ASRTestBody)) -> Dict[str, Any]:
+    """测试自定义转写 API 是否可用。
+
+    默认只做协议层探测（不发音频，秒回）。
+    body.deep=True 时额外用 ffmpeg 合成一段 ~7s 的测试语音，真跑一次转写 ——
+    只有能拿回文字才算「模型真可用」（避免 /config 能通但推理挂了的情况）。
+    """
+    from ...core.asr_remote import ASRConfig, probe_asr_backend
+
+    saved = config.whisper.get("api") or {}
+    merged = {
+        "protocol": body.protocol if body.protocol is not None else saved.get("protocol", "openai"),
+        "base_url": body.base_url if body.base_url is not None else saved.get("base_url", ""),
+        "api_key": body.api_key if body.api_key is not None else saved.get("api_key", ""),
+        "model": body.model if body.model is not None else saved.get("model", ""),
+        "timeout": body.timeout if body.timeout is not None else saved.get("timeout", 600),
+        # 深度测试也要用真实的字幕参数，否则测出来的东西和实际用的不一样
+        "language": saved.get("language", "auto"),
+        "max_chars": saved.get("max_chars", 20),
+        "punc": saved.get("punc", True),
+        "hotwords": saved.get("hotwords", ""),
+        "diarize": saved.get("diarize", False),
+        "prompt": saved.get("prompt", ""),
+    }
+    cfg = ASRConfig.from_dict(merged)
+    try:
+        result = probe_asr_backend(cfg)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"探测失败：{exc}") from exc
+
+    if body.deep:
+        try:
+            deep = _run_deep_asr_test(cfg)
+        except Exception as exc:  # noqa: BLE001 - 深度测试失败不掩盖探测结果
+            deep = {"ok": False, "error": f"深度测试异常：{exc}"}
+        result["deep"] = deep
+        # 深度测试才能证明「真能转写」：它失败时整体判失败
+        if result.get("ok") and not deep.get("ok"):
+            result["ok"] = False
+            result["error"] = deep.get("error", "真实转写测试失败")
+
+    ok = bool(result.get("ok"))
+    if ok:
+        event_bus.emit_log("INFO", f"转写 API 测试通过 · {result.get('detail')}", source="asr-test")
+    else:
+        event_bus.emit_log("WARN", f"转写 API 测试失败：{result.get('error')}", source="asr-test")
+    return result
+
+
+def _run_deep_asr_test(cfg) -> Dict[str, Any]:
+    """合成一段测试语音并真跑一次转写，返回 {ok, text, segments, elapsedMs, error}。"""
+    import tempfile
+    import time as _time
+
+    from ...core.asr_remote import RemoteASREngine
+    from ...infra.tools import ToolError, resolve_tools, run
+
+    out: Dict[str, Any] = {"ok": False, "text": "", "segments": 0,
+                          "elapsedMs": 0, "error": "", "audio": ""}
+    tools = resolve_tools()
+    if not tools.ffmpeg:
+        out["error"] = "未找到 ffmpeg，无法生成测试语音"
+        return out
+
+    # ~7 秒英文测试句（flite 免网络、发音清晰，Qwen3-ASR 与 Whisper 都能认）
+    sentence = ("hello world this is a test of the speech recognition service "
+                "running on this machine")
+    tmpdir = tempfile.mkdtemp(prefix="vair-asr-test-")
+    wav = os.path.join(tmpdir, "probe.wav")
+    try:
+        cmd = [tools.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "lavfi", "-i", f"flite=text='{sentence}':voice=slt",
+               "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav]
+        proc = run(cmd, timeout=60)
+        if proc.returncode != 0 or not os.path.isfile(wav):
+            err = (proc.stderr or b"").decode("utf-8", errors="replace")[:200]
+            out["error"] = f"ffmpeg 合成测试语音失败：{err or '未知错误'}"
+            return out
+        out["audio"] = wav
+
+        engine = RemoteASREngine(cfg)
+        started = _time.time()
+        sub = engine.transcribe(wav)
+        out["elapsedMs"] = int((_time.time() - started) * 1000)
+        out["text"] = (sub.text or "")[:200]
+        out["segments"] = len(sub.segments or [])
+        if sub.error and not (sub.text or "").strip():
+            out["error"] = sub.error
+            return out
+        if not (sub.text or "").strip():
+            out["error"] = "转写服务返回了空文本（服务在跑，但模型可能没加载好）"
+            return out
+        out["ok"] = True
+        return out
+    except ToolError as exc:
+        out["error"] = str(exc)
+        return out
+    finally:
+        try:
+            if os.path.isfile(wav):
+                os.unlink(wav)
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
 
 
 @app.post("/api/whisper/setup")

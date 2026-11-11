@@ -35,16 +35,17 @@ bootstrap.early_init()  # ← 红线 G1：必须最先执行
 
 
 def _local_ip() -> str:
-    """获取本机在局域网中的 IP（供手机访问提示）。"""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(0.5)
-        sock.connect(("8.8.8.8", 80))
-        ip = sock.getsockname()[0]
-        sock.close()
-        return ip
-    except OSError:
-        return "127.0.0.1"
+    """获取本机真实可用的局域网 IP（供手机访问提示）。
+
+    不能用 `connect(("8.8.8.8", 80))`：本机装了代理软件（TUN 模式）时，
+    到公网的路由会被劫持，拿回来的是 198.18.x.x（RFC 2544 保留网段，
+    手机根本连不上）—— 这正是「手机访问 IP 错了」的原因。
+    改成连**内网网关**，并显式过滤掉代理 TUN 假地址。
+    """
+    from app.shell.web.api import _lan_ips
+
+    ips = _lan_ips(limit=1)
+    return ips[0] if ips else "127.0.0.1"
 
 
 def _lan_from_config() -> bool:
