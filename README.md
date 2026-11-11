@@ -7,6 +7,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://www.microsoft.com/windows)
 [![faster-whisper](https://img.shields.io/badge/faster--whisper-large--v3--turbo-orange)](https://github.com/SYSTRAN/faster-whisper)
 [![Repo](https://img.shields.io/badge/GitHub-videoAIrename--webUI-181717?logo=github)](https://github.com/xiaoweo233/videoAIrename-webUI)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 🎯 **本地视频 AI 归档工具** — 拖入一个文件夹，自动看懂每个视频讲了什么，
 然后重命名、写元数据、生成 NFO / SRT。
@@ -36,6 +37,7 @@ OpenAI 兼容服务），不强制上云；离线也能跑 Whisper。
 - [🚨 注意事项](#-注意事项)
 - [❓ 常见问题](#-常见问题)
 - [技术栈](#技术栈)
+- [📄 许可证](#-许可证)
 - [🙏 致谢](#-致谢)
 
 ## ✨ 主要特性
@@ -411,6 +413,22 @@ A：该脚本必须以 **ANSI(GBK)** 保存 —— Windows 脚本宿主只认 GB
 | 元数据 | ExifTool（perl 版，UTF-8 ArgFile） |
 | 语音 | faster-whisper（CTranslate2，CUDA / CPU） |
 | AI | OpenAI 兼容接口 或 Google Gemini（多模态） |
+
+## 📄 许可证
+
+本项目采用 [MIT License](LICENSE) 开源。
+
+```
+Copyright (c) 2026 xiaoweo233
+```
+
+你可以自由地使用、复制、修改、合并、发布、分发、再许可和/或销售本软件的副本，
+唯一的要求是保留上述版权声明与许可声明。本软件按「原样」提供，不附带任何明示或
+暗示的担保。
+
+> 注意：MIT 许可仅覆盖本仓库自身的源代码。程序运行时会下载或调用的第三方组件
+> （faster-whisper、FFmpeg、ExifTool、FastAPI 等）遵循各自的许可证，其中 FFmpeg
+> 的授权方式取决于你使用的构建版本（LGPL / GPL），商用分发前请自行确认。
 
 ## 🙏 致谢
 
